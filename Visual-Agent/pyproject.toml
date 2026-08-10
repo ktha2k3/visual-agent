@@ -3,7 +3,7 @@ name = "visual-agent"
 version = "0.1.0"
 description = "Visual Agent"
 authors = [
-    {name = "meoconlonton",email = "trankimquang1603@gmail.com"}
+    {name = "ktha",email = "khongtronghoanganh@gmail.com"}
 ]
 readme = "README.md"
 requires-python = "^3.11,<4.0"
