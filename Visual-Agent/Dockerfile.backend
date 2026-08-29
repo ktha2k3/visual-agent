@@ -13,6 +13,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     libxrender1 \
     libxcb1 \
+    ffmpeg \
+    build-essential \
+    pkg-config \
+    libcairo2-dev \
+    libpango1.0-dev \
+    texlive-latex-base \
+    texlive-latex-extra \
+    texlive-fonts-recommended \
+    dvisvgm \
+    fonts-noto-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./

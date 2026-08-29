@@ -14,11 +14,43 @@ services:
     env_file:
       - .env
     environment:
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL_DOCKER:-http://host.docker.internal:11434/v1}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
+      EMBEDDING_BASE_URL: ${DOCKER_EMBEDDING_BASE_URL:-http://host.docker.internal:11434/v1}
       REDIS_URL: redis://redis:6379
       DEBUG_STREAM: "false"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    depends_on:
+      - redis
+    volumes:
+      - knowledge_uploads:/app/assets/knowledge-uploads
+      - app_data:/app/data
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: ["python", "worker.py"]
+    env_file:
+      - .env
+    environment:
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - redis
+    volumes:
+      - knowledge_uploads:/app/assets/knowledge-uploads
+      - app_data:/app/data
+    restart: unless-stopped
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: ["sh", "-c", "python scheduler.py && rqscheduler --url redis://redis:6379"]
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379
     depends_on:
       - redis
     restart: unless-stopped
@@ -32,3 +64,7 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+
+volumes:
+  knowledge_uploads:
+  app_data:

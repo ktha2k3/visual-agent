@@ -1,557 +1,564 @@
-import { useState, useRef, useEffect, useCallback, Component } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
+import { accessToken, authHeaders, supabase } from './supabase'
 
-const AGENT_META = {
-  supervisor:     { icon: '🎯', label: 'Supervisor',      color: '#818cf8' },
-  research_agent: { icon: '🔬', label: 'Research Agent',  color: '#60a5fa' },
-  vision_agent:   { icon: '👁️',  label: 'Vision Agent',   color: '#f59e0b' },
-  agent:          { icon: '🧠', label: 'Agent Reasoning', color: '#60a5fa' },
-  tools:          { icon: '🔧', label: 'Tool Execution',  color: '#34d399' },
+const SUBJECTS = [
+  { id: 'math', label: 'Toán', icon: '∫' },
+  { id: 'physics', label: 'Vật lí', icon: '⚛' },
+  { id: 'chemistry', label: 'Hóa học', icon: '⚗' },
+  { id: 'biology', label: 'Sinh học', icon: '🧬' },
+]
+const SUBJECT_LABEL = Object.fromEntries(SUBJECTS.map(item => [item.id, item.label]))
+const SESSION_KEY = 'stem_tutor_session'
+const KNOWLEDGE_SELECTION_KEY = 'stem_tutor_knowledge_selection'
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+function assertUploadSize(file) {
+  if (file?.size > MAX_UPLOAD_BYTES) throw new Error('Tệp vượt quá giới hạn 25 MB.')
 }
 
-function agentMeta(name) {
-  return AGENT_META[name] ?? { icon: '🤖', label: name, color: '#94a3b8' }
+function sessionId() {
+  const existing = localStorage.getItem(SESSION_KEY)
+  if (existing) return existing
+  const value = crypto.randomUUID()
+  localStorage.setItem(SESSION_KEY, value)
+  return value
 }
 
-const _LS_KEY = 'va_session_id'
-
-function genSessionId() {
-  return typeof crypto !== 'undefined' && crypto.randomUUID
-    ? crypto.randomUUID()
-    : Math.random().toString(36).slice(2) + Date.now().toString(36)
+async function apiFetch(path, options = {}) {
+  const headers = { ...(await authHeaders()), ...(options.headers || {}) }
+  const response = await fetch(path, { ...options, headers })
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}))
+    throw new Error(payload.detail || `HTTP ${response.status}`)
+  }
+  return response
 }
 
-// ── Error boundary — prevents a broken KaTeX formula from crashing the app ──
-class MarkdownErrorBoundary extends Component {
-  state = { crashed: false }
-  static getDerivedStateFromError() { return { crashed: true } }
-  componentDidCatch(err) { console.warn('[markdown]', err.message) }
-  render() {
-    if (this.state.crashed) {
-      // Reset on next content change so fixed text re-renders correctly
-      return <span style={{ whiteSpace: 'pre-wrap' }}>{this.props.children}</span>
+function websocketUrl(path) {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${protocol}//${window.location.host}${path}`
+}
+
+async function streamTutorWebSocket(request, onEvent) {
+  const token = await accessToken()
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(websocketUrl('/api/tutor/ws'))
+    let settled = false
+    let receivedEvent = false
+    const fail = (message) => {
+      if (settled) return
+      settled = true
+      const error = new Error(message)
+      error.canFallback = !receivedEvent
+      reject(error)
     }
-    return this.props.children
-  }
-}
-
-// Full markdown with math (for committed, complete messages)
-function MarkdownContent({ children }) {
-  return (
-    <MarkdownErrorBoundary key={children}>
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
-        {children}
-      </ReactMarkdown>
-    </MarkdownErrorBoundary>
-  )
-}
-
-// Plain GFM only — used while streaming to avoid KaTeX crashing on partial LaTeX
-function MarkdownStream({ children }) {
-  return (
-    <MarkdownErrorBoundary key={children}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-        {children}
-      </ReactMarkdown>
-    </MarkdownErrorBoundary>
-  )
-}
-
-// ── Agent card section ─────────────────────────────────────────────────────
-function Section({ section }) {
-  if (section.type === 'text') {
-    return (
-      <div className="sec-text">
-        <MarkdownContent>{section.content}</MarkdownContent>
-      </div>
-    )
-  }
-  if (section.type === 'tool_call') {
-    return (
-      <div className="sec-tool-call">
-        <span className="tool-badge call">⚡ {section.tool}</span>
-        {section.args && <code className="tool-args">{section.args}</code>}
-      </div>
-    )
-  }
-  if (section.type === 'tool_result') {
-    return (
-      <div className="sec-tool-result">
-        <span className="tool-badge result">📥 {section.tool} result</span>
-        <pre className="tool-content">{section.content}</pre>
-      </div>
-    )
-  }
-  return null
-}
-
-function AgentCard({ name, sections, isActive }) {
-  const bodyRef = useRef(null)
-  const meta = agentMeta(name)
-  useEffect(() => {
-    if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
-  }, [sections])
-  return (
-    <div className={`agent-card ${isActive ? 'active' : 'done'}`} style={{ '--accent': meta.color }}>
-      <div className="agent-card-header">
-        <span className="agent-icon">{meta.icon}</span>
-        <span className="agent-name">{meta.label}</span>
-        {isActive ? <span className="status-dot active" /> : <span className="status-done">✓</span>}
-      </div>
-      <div className="agent-card-body" ref={bodyRef}>
-        {sections.map((s, i) => <Section key={i} section={s} />)}
-        {isActive && sections.length === 0 && <span className="thinking">thinking…</span>}
-      </div>
-    </div>
-  )
-}
-
-// ── Lightbox ───────────────────────────────────────────────────────────────
-function Lightbox({ src, onClose }) {
-  const [scale, setScale] = useState(1)
-
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose() }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  const onWheel = (e) => {
-    e.preventDefault()
-    setScale(prev => Math.min(Math.max(prev - e.deltaY * 0.001, 0.3), 6))
-  }
-
-  return (
-    <div className="lb-overlay" onClick={onClose} onWheel={onWheel}>
-      <img
-        src={src}
-        alt="full size"
-        className="lb-img"
-        style={{ transform: `scale(${scale})` }}
-        onClick={e => e.stopPropagation()}
-        draggable={false}
-      />
-      <button className="lb-close" onClick={onClose} title="Close (Esc)">✕</button>
-      <span className="lb-hint">Scroll to zoom · right-click to copy/save · Esc to close</span>
-    </div>
-  )
-}
-
-// ── Chat message bubble ────────────────────────────────────────────────────
-function ChatMessage({ msg }) {
-  const isUser = msg.role === 'user'
-  const [lightbox, setLightbox] = useState(false)
-
-  return (
-    <div className={`chat-msg ${isUser ? 'user' : 'assistant'}`}>
-      <div className="chat-avatar">{isUser ? '🧑' : '🤖'}</div>
-      <div className="chat-bubble">
-        {msg.imagePreview && (
-          <img
-            src={msg.imagePreview}
-            alt="attached"
-            className="chat-img-preview"
-            onClick={() => setLightbox(true)}
-            title="Click to view full size"
-          />
-        )}
-        {isUser
-          ? <p className="chat-text-user">{msg.text}</p>
-          : (
-            <div className="response-markdown">
-              <MarkdownContent>{msg.text}</MarkdownContent>
-            </div>
-          )
+    socket.onopen = () => socket.send(JSON.stringify({ access_token: token, request }))
+    socket.onmessage = (message) => {
+      receivedEvent = true
+      try {
+        const event = JSON.parse(message.data)
+        onEvent(event)
+        if (event.type === 'done' && !settled) {
+          settled = true
+          resolve()
+          socket.close()
         }
-      </div>
-      {lightbox && <Lightbox src={msg.imagePreview} onClose={() => setLightbox(false)} />}
-    </div>
+      } catch (_error) {
+        fail('WebSocket returned an invalid event')
+      }
+    }
+    socket.onerror = () => fail('WebSocket connection failed')
+    socket.onclose = () => {
+      if (!settled) fail('WebSocket closed before the response completed')
+    }
+  })
+}
+
+async function streamTutorSse(request, onEvent) {
+  const response = await apiFetch('/api/tutor/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  })
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const blocks = buffer.split('\n\n')
+    buffer = blocks.pop()
+    for (const block of blocks) {
+      const line = block.split('\n').find(item => item.startsWith('data: '))
+      if (line) onEvent(JSON.parse(line.slice(6)))
+    }
+  }
+}
+
+function Markdown({ children }) {
+  return <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{children || ''}</ReactMarkdown>
+}
+
+function AuthenticatedVideo({ visualization }) {
+  const [source, setSource] = useState('')
+  const [error, setError] = useState('')
+  useEffect(() => {
+    let active = true
+    let objectUrl = ''
+    apiFetch(visualization.video_url)
+      .then(response => response.blob())
+      .then(blob => {
+        if (!active) return
+        objectUrl = URL.createObjectURL(blob)
+        setSource(objectUrl)
+      })
+      .catch(err => { if (active) setError(err.message) })
+    return () => {
+      active = false
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [visualization.video_url])
+  return <section className="visualization-card">
+    <header><div><span className="eyebrow">Animation Manim</span><h3>{visualization.concept}</h3></div>{visualization.cached && <small>Đã dùng lại</small>}</header>
+    {source && <video controls playsInline preload="metadata" src={source}>Trình duyệt không hỗ trợ video.</video>}
+    {!source && !error && <div className="visualization-loading">Đang tải animation…</div>}
+    {error && <p className="visualization-error">Không thể tải animation: {error}</p>}
+    {visualization.formulas?.length > 0 && <Markdown>{visualization.formulas.map(formula => `$$${formula}$$`).join('\n\n')}</Markdown>}
+    <p>{visualization.key_takeaway}</p>
+  </section>
+}
+
+function Login() {
+  const [email, setEmail] = useState('')
+  const [status, setStatus] = useState('')
+  const sendLink = async (event) => {
+    event.preventDefault()
+    setStatus('Đang gửi liên kết…')
+    const { error } = await supabase.auth.signInWithOtp({
+      email, options: { emailRedirectTo: window.location.origin },
+    })
+    setStatus(error ? error.message : 'Đã gửi! Hãy kiểm tra email của bạn.')
+  }
+  return (
+    <main className="auth-shell"><section className="auth-card">
+      <span className="auth-mark">STEM</span><h1>Trợ giảng STEM lớp 12</h1>
+      <p>Chụp bài, nhận gợi ý từng bước và ôn đúng chủ đề mình đang yếu.</p>
+      <form onSubmit={sendLink}><label htmlFor="email">Email</label>
+        <input id="email" type="email" required value={email} onChange={e => setEmail(e.target.value)} placeholder="ban@example.com" />
+        <button type="submit">Gửi liên kết đăng nhập</button></form>
+      {status && <p className="auth-status">{status}</p>}
+    </section></main>
   )
 }
 
-// ── Main app ───────────────────────────────────────────────────────────────
-export default function App() {
-  // Persist session across page refreshes via localStorage
-  const [sessionId, setSessionId] = useState(() => {
-    const stored = localStorage.getItem(_LS_KEY)
-    if (stored) return stored
-    const id = genSessionId()
-    localStorage.setItem(_LS_KEY, id)
-    return id
-  })
-  const [input, setInput] = useState('')
-  const [attachedImage, setAttachedImage] = useState(null)
-  const [isUploading, setIsUploading] = useState(false)
+function ProgressPanel({ stages, problem, hintLevel, citations }) {
+  const [draft, setDraft] = useState('')
+  useEffect(() => { setDraft(problem?.problem_markdown || '') }, [problem])
+  return (
+    <aside className="progress-panel">
+      <div className="panel-heading"><div><span className="eyebrow">Tiến trình học</span><h2>Phiên hiện tại</h2></div><span className="hint-pill">Gợi ý {hintLevel}/4</span></div>
+      <ol className="stage-list">
+        {stages.length === 0 && <li className="muted">Các bước xử lý sẽ xuất hiện tại đây.</li>}
+        {stages.map((stage, index) => <li key={`${stage.stage}-${index}`} className={index === stages.length - 1 ? 'current' : 'complete'}><span>{index < stages.length - 1 ? '✓' : '•'}</span>{stage.label}</li>)}
+      </ol>
+      {problem && <section className="transcription-card"><span className="eyebrow">Bản chép đề · {Math.round(problem.confidence * 100)}%</span>
+        <textarea value={draft} onChange={e => setDraft(e.target.value)} aria-label="Bản chép đề" />
+        <p>Bạn có thể sửa rồi gửi nội dung này ở khung chat để xác nhận.</p></section>}
+      {citations.length > 0 && <section className="source-list"><span className="eyebrow">Nguồn đã đối chiếu</span>
+        {citations.map((item, index) => item.url?.startsWith('http')
+          ? <a key={`${item.url}-${index}`} href={item.url} target="_blank" rel="noreferrer">{item.title}</a>
+          : <span key={`${item.title}-${index}`}>{item.title} · học liệu riêng</span>)}</section>}
+    </aside>
+  )
+}
 
-  // Chat history: { role, text, imagePreview? }
-  const [chatHistory, setChatHistory] = useState([])
-  // Streaming accumulator for the current assistant reply
-  const [streamingText, setStreamingText] = useState('')
-  const [isStreaming, setIsStreaming] = useState(false)
+function MasteryPanel({ mastery, summary, recommendations }) {
+  const hasEvidence = (summary?.evidence_count || 0) > 0
+  return (
+    <aside className="mastery-panel"><div className="panel-heading"><div><span className="eyebrow">Đánh giá từ hội thoại</span><h2>Hồ sơ năng lực</h2></div></div>
+      <section className={`profile-summary ${hasEvidence ? '' : 'empty'}`}>
+        <div><strong>{summary?.level || 'Chưa đủ dữ liệu'}</strong>{summary?.overall_mastery != null && <b>{Math.round(summary.overall_mastery * 100)}%</b>}</div>
+        <p>{summary?.narrative || 'Hồ sơ chỉ được tạo từ câu trả lời có thể đánh giá trong phiên học.'}</p>
+        {hasEvidence && <small>{summary.evidence_count} câu trả lời · {summary.observed_skills} kỹ năng · độ tin cậy {Math.round(summary.confidence * 100)}%</small>}
+        {summary?.strengths?.length > 0 && <div className="profile-signals"><span>Điểm mạnh</span>{summary.strengths.map(item => <em key={item}>{item}</em>)}</div>}
+        {summary?.focus_areas?.length > 0 && <div className="profile-signals focus"><span>Cần củng cố</span>{summary.focus_areas.map(item => <em key={item}>{item}</em>)}</div>}
+      </section>
+      <div className="recommendation-list">{recommendations.length === 0 && <div className="empty-recommendations"><p className="muted">{hasEvidence ? 'Chưa có chủ đề ưu tiên mới.' : 'Hãy gửi bài và trình bày cách làm. Câu hỏi xin gợi ý sẽ không bị tính là làm sai.'}</p></div>}
+        {recommendations.slice(0, 6).map(item => <article key={item.skill_id} className="recommendation-card"><div><span>{SUBJECT_LABEL[item.subject]}</span><b>{Math.round(item.score * 100)}</b></div><h3>{item.title}</h3><p>{item.reason}</p></article>)}</div>
+      <div className="mastery-list">{mastery.map(item => <div className="mastery-row" key={item.skill_id}><span>{item.skill_id.split('.').slice(1).join(' ')}</span><div><i style={{ width: `${item.mastery * 100}%` }} /></div><b>{Math.round(item.mastery * 100)}%</b><small>{item.attempts} bằng chứng</small></div>)}</div>
+    </aside>
+  )
+}
 
-  // Agent activity for the current request
-  const [agentData, setAgentData] = useState({})
-  const [agentOrder, setAgentOrder] = useState([])
-
-  const [errorMsg, setErrorMsg] = useState('')
-
-  const chatEndRef = useRef(null)
-  const fileInputRef = useRef(null)
-  const agentTextAccumRef = useRef({})
-  // Mirror of streamingText in a ref so the 'done' handler can read the
-  // current value synchronously without calling setState inside a setState updater.
-  const streamingTextRef = useRef('')
+function KnowledgePanel({ subject, selectedDocumentIds, onSelectionChange, onClose }) {
+  const [activeTab, setActiveTab] = useState('upload')
+  const [file, setFile] = useState(null)
+  const [title, setTitle] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [jobs, setJobs] = useState([])
+  const [documents, setDocuments] = useState([])
+  const [error, setError] = useState('')
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [chatHistory, streamingText])
+    let active = true
+    const refresh = () => Promise.all([
+      apiFetch('/api/knowledge/jobs?limit=50').then(response => response.json()),
+      apiFetch('/api/knowledge/documents?limit=50').then(response => response.json()),
+    ])
+      .then(([jobPayload, documentPayload]) => {
+        if (active) {
+          setJobs(jobPayload.items || [])
+          setDocuments(documentPayload.items || [])
+        }
+      })
+      .catch(err => { if (active) setError(err.message) })
+    refresh()
+    const timer = window.setInterval(refresh, 2000)
+    return () => { active = false; window.clearInterval(timer) }
+  }, [subject])
 
-  // ── Image upload ───────────────────────────────────────────────────────────
-  const uploadFile = useCallback(async (file) => {
-    if (!file?.type.startsWith('image/')) return
-    setIsUploading(true)
+  const submit = async (event) => {
+    event.preventDefault()
+    if (!file || busy) return
+    const formElement = event.currentTarget
+    try {
+      assertUploadSize(file)
+    } catch (err) {
+      setError(err.message)
+      return
+    }
+    setBusy(true); setError('')
     try {
       const form = new FormData()
       form.append('file', file)
-      const res = await fetch('/api/upload', { method: 'POST', body: form })
-      if (!res.ok) throw new Error(`Upload failed (${res.status})`)
-      const { path } = await res.json()
-      setAttachedImage({ previewUrl: URL.createObjectURL(file), serverPath: path, name: file.name || 'image' })
+      form.append('subject', subject)
+      if (title.trim()) form.append('title', title.trim())
+      const response = await apiFetch('/api/knowledge', { method: 'POST', body: form })
+      const queued = await response.json()
+      setJobs(current => [{ ...queued, id: queued.job_id }, ...current.filter(item => item.id !== queued.job_id)])
+      setFile(null); setTitle('')
+      formElement.reset()
+      setActiveTab('documents')
     } catch (err) {
-      setErrorMsg(err.message)
+      setError(err.message)
     } finally {
-      setIsUploading(false)
+      setBusy(false)
     }
-  }, [])
-
-  // Called by the × button — revokes the blob URL to free memory
-  const removeImage = useCallback(() => {
-    setAttachedImage(prev => { if (prev?.previewUrl) URL.revokeObjectURL(prev.previewUrl); return null })
-  }, [])
-
-  // Called on submit — clears the attachment WITHOUT revoking the blob URL
-  // so the URL stored in chatHistory remains valid for display
-  const clearImageAfterSend = useCallback(() => {
-    setAttachedImage(null)
-  }, [])
-
-  const handleFileChange = (e) => {
-    const file = e.target.files?.[0]
-    if (file) uploadFile(file)
-    e.target.value = ''
   }
 
-  const handlePaste = useCallback((e) => {
-    for (const item of e.clipboardData?.items ?? []) {
-      if (item.type.startsWith('image/')) { e.preventDefault(); uploadFile(item.getAsFile()); break }
-    }
-  }, [uploadFile])
+  const documentIds = new Set(documents.map(document => document.id))
+  const visibleJobs = jobs.filter(job => job.status !== 'completed' || !job.document_id || !documentIds.has(job.document_id))
+  const counts = jobs.reduce((summary, job) => ({
+    ...summary,
+    [job.status]: (summary[job.status] || 0) + 1,
+  }), { pending: 0, processing: 0, completed: 0, failed: 0 })
+  const completedWithoutDocument = visibleJobs.filter(job => job.status === 'completed').length
+  const completedCount = documents.length + completedWithoutDocument
+  const libraryCount = counts.pending + counts.processing + counts.failed + completedCount
 
-  const handleDrop = useCallback((e) => {
-    e.preventDefault()
-    const file = e.dataTransfer.files?.[0]
-    if (file?.type.startsWith('image/')) uploadFile(file)
-  }, [uploadFile])
+  return <div className="admin-overlay"><section className="admin-panel knowledge-panel">
+    <header><div><span className="eyebrow">Kho RAG của bạn</span><h2>Thêm học liệu {SUBJECT_LABEL[subject]}</h2></div><button onClick={onClose}>Đóng</button></header>
+    <nav className="knowledge-tabs" role="tablist" aria-label="Quản lý học liệu">
+      <button role="tab" aria-selected={activeTab === 'upload'} className={activeTab === 'upload' ? 'active' : ''} onClick={() => setActiveTab('upload')}>Tải tài liệu</button>
+      <button role="tab" aria-selected={activeTab === 'documents'} className={activeTab === 'documents' ? 'active' : ''} onClick={() => setActiveTab('documents')}>Tài liệu đã tải <span>{libraryCount}</span></button>
+    </nav>
+    {activeTab === 'upload' && <form onSubmit={submit}>
+      <label>Tiêu đề <input value={title} onChange={event => setTitle(event.target.value)} placeholder="Tự lấy tên file nếu để trống" maxLength={300} /></label>
+      <label>Tệp tài liệu <input required type="file" accept=".txt,.md,.markdown,.pdf,.docx" onChange={event => {
+        const selected = event.target.files?.[0] || null
+        try { assertUploadSize(selected); setFile(selected); setError('') } catch (err) { setFile(null); setError(err.message); event.target.value = '' }
+      }} /></label>
+      <small>Hỗ trợ TXT, Markdown, PDF, DOCX · tối đa 25 MB</small>
+      <button type="submit" disabled={!file || busy}>{busy ? 'Đang tải lên…' : 'Tải lên và xử lý'}</button>
+    </form>}
+    {error && <div className="error-banner">{error}</div>}
+    {activeTab === 'documents' && <section className="knowledge-library">
+      <div className="knowledge-selection-note"><span>{selectedDocumentIds.length > 0 ? `${selectedDocumentIds.length} tài liệu được dùng làm nguồn cho chat` : 'Chưa chọn riêng: chat sẽ tìm trong toàn bộ kho học liệu'}</span>{selectedDocumentIds.length > 0 && <button onClick={() => onSelectionChange([])}>Dùng tất cả</button>}</div>
+      <div className="knowledge-status-summary">
+        <div><strong>{counts.pending}</strong><span>Đang chờ</span></div>
+        <div><strong>{counts.processing}</strong><span>Đang xử lý</span></div>
+        <div><strong>{completedCount}</strong><span>Hoàn tất</span></div>
+        <div><strong>{counts.failed}</strong><span>Thất bại</span></div>
+      </div>
+      {libraryCount === 0 && <div className="knowledge-empty"><strong>Chưa có tài liệu</strong><span>Các tài liệu bạn tải lên sẽ xuất hiện tại đây.</span></div>}
+      {libraryCount > 0 && <div className="knowledge-jobs">{visibleJobs.map(job => <article key={job.id || job.job_id} className={job.status}>
+      <div><strong>{job.title}</strong><span>{job.status === 'pending' ? 'Đang chờ' : job.status === 'processing' ? 'Đang xử lý' : job.status === 'completed' ? 'Hoàn tất' : 'Thất bại'}</span></div>
+      <small>{job.original_filename || job.filename} · {SUBJECT_LABEL[job.subject]}{job.status === 'completed' ? ` · ${job.chunks} đoạn · ${job.embedding_status === 'lexical_fallback' ? 'tìm kiếm từ khóa' : 'đã embedding'}` : ''}</small>
+      {job.error && <p>{job.error}</p>}
+      </article>)}{documents.map(document => <article key={document.id} className="completed">
+        <div><strong>{document.title}</strong><span>Hoàn tất</span></div>
+        <small>{document.original_filename || 'Tài liệu đã nhập'} · {SUBJECT_LABEL[document.subject]} · {document.chunks} đoạn · {document.embedding_status === 'lexical_fallback' ? 'tìm kiếm từ khóa' : 'đã embedding'}</small>
+        <label className="knowledge-document-select"><input type="checkbox" checked={selectedDocumentIds.includes(document.id)} onChange={() => onSelectionChange(selectedDocumentIds.includes(document.id) ? selectedDocumentIds.filter(id => id !== document.id) : [...selectedDocumentIds, document.id])} /><span>Dùng tài liệu này trong chat</span></label>
+      </article>)}</div>}
+    </section>}
+  </section></div>
+}
 
-  // ── Agent section helpers ──────────────────────────────────────────────────
-  const pushSection = useCallback((agentName, section) => {
-    if (section.type === 'text') {
-      agentTextAccumRef.current[agentName] = (agentTextAccumRef.current[agentName] ?? '') + section.content
-    }
-    setAgentData(prev => {
-      const agent = prev[agentName] ?? { sections: [], isActive: true }
-      const sections = [...agent.sections]
-      if (section.type === 'text') {
-        const last = sections[sections.length - 1]
-        if (last?.type === 'text') {
-          sections[sections.length - 1] = { type: 'text', content: last.content + section.content }
-          return { ...prev, [agentName]: { ...agent, sections } }
-        }
-      }
-      return { ...prev, [agentName]: { ...agent, sections: [...sections, section] } }
-    })
+function ChatHistoryPanel({ currentSessionId, onClose, onSelect }) {
+  const [sessions, setSessions] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    apiFetch('/api/chat/sessions?limit=50')
+      .then(response => response.json())
+      .then(payload => setSessions(payload.items || []))
+      .catch(err => setError(err.message))
+      .finally(() => setLoading(false))
   }, [])
 
-  // ── SSE handler ────────────────────────────────────────────────────────────
-  const handleEvent = useCallback((event) => {
-    switch (event.type) {
-      case 'agent_start':
-        setAgentOrder(prev => prev.includes(event.agent) ? prev : [...prev, event.agent])
-        setAgentData(prev => ({ ...prev, [event.agent]: prev[event.agent] ?? { sections: [], isActive: true } }))
-        break
-      case 'token':
-        if (event.agent === 'supervisor') {
-          streamingTextRef.current += event.content
-          setStreamingText(prev => prev + event.content)
-        } else {
-          pushSection(event.agent, { type: 'text', content: event.content })
-        }
-        break
-      case 'tool_call':
-        pushSection(event.agent, { type: 'tool_call', tool: event.tool, args: event.args })
-        break
-      case 'tool_result':
-        pushSection(event.agent, { type: 'tool_result', tool: event.tool, content: event.content })
-        break
-      case 'handoff':
-        // Only clear when the supervisor routes OUT to a sub-agent (transfer_to_X).
-        // Do NOT clear on the return trip (transfer_back_to_supervisor).
-        if (!event.tool?.toLowerCase().includes('back')) {
-          streamingTextRef.current = ''
-          setStreamingText('')
-        }
-        break
-      case 'error':
-        setErrorMsg(event.content)
-        break
-      case 'done': {
-        // Mark all agents done
-        setAgentData(prev => {
-          const next = {}
-          for (const [k, v] of Object.entries(prev)) next[k] = { ...v, isActive: false }
-          return next
-        })
+  return <div className="admin-overlay"><section className="admin-panel chat-history-panel">
+    <header><div><span className="eyebrow">Dữ liệu hội thoại</span><h2>Lịch sử phiên chat</h2></div><button onClick={onClose}>Đóng</button></header>
+    {loading && <p>Đang tải lịch sử…</p>}
+    {error && <div className="error-banner">{error}</div>}
+    {!loading && !error && sessions.length === 0 && <div className="history-empty"><strong>Chưa có phiên chat đã lưu</strong><span>Phiên sẽ xuất hiện sau khi bạn gửi tin nhắn đầu tiên và backend ghi nhận hội thoại.</span></div>}
+    {sessions.length > 0 && <div className="chat-session-list">{sessions.map(session => <button key={session.session_id} className={session.session_id === currentSessionId ? 'active' : ''} onClick={() => onSelect(session)}>
+      <div><strong>{session.title}</strong>{session.subject && <span>{SUBJECT_LABEL[session.subject]}</span>}</div>
+      <p>{session.last_message}</p>
+      <small>{session.message_count} tin nhắn · {new Date(session.updated_at).toLocaleString('vi-VN')}</small>
+    </button>)}</div>}
+  </section></div>
+}
 
-        // Read current streaming text from the ref (synchronous, no stale closure)
-        let final = streamingTextRef.current
-        if (!final.trim() && !event.supervisor_responded) {
-          const accum = agentTextAccumRef.current
-          for (const name of ['agent', 'research_agent', 'vision_agent']) {
-            if (accum[name]?.trim()) { final = accum[name]; break }
-          }
-          if (!final.trim()) {
-            for (const [name, text] of Object.entries(accum)) {
-              if (name !== 'tools' && text?.trim()) { final = text; break }
-            }
-          }
-        }
+function ExamPlanPanel({ subject, onClose }) {
+  const [plan, setPlan] = useState(null)
+  const [error, setError] = useState('')
+  const [targetScore, setTargetScore] = useState('')
+  useEffect(() => {
+    setPlan(null); setError('')
+    const query = targetScore ? `?target_score=${encodeURIComponent(targetScore)}` : ''
+    apiFetch(`/api/me/exam-plan/${subject}${query}`)
+      .then(response => response.json())
+      .then(setPlan)
+      .catch(err => setError(err.message))
+  }, [subject, targetScore])
 
-        // Commit to chat history and clear display — separate setState calls,
-        // never nested inside each other (calling setState inside a setState
-        // updater is a React anti-pattern that silently drops the inner update).
-        if (final.trim()) {
-          setChatHistory(h => [...h, { role: 'assistant', text: final }])
-        }
-        streamingTextRef.current = ''
-        setStreamingText('')
-        break
-      }
-      default: break
-    }
-  }, [pushSection])
+  const research = plan?.research
+  return <div className="admin-overlay"><section className="admin-panel exam-plan-panel">
+    <header><div><span className="eyebrow">Research → Supervisor</span><h2>Lộ trình điểm thi {SUBJECT_LABEL[subject]}</h2></div><button onClick={onClose}>Đóng</button></header>
+    <section className="exam-plan-guide">
+      <div><h3>Cách sử dụng</h3><ol>
+        <li>Chọn môn trên thanh điều hướng trước khi mở lộ trình.</li>
+        <li>Chọn mức điểm mục tiêu để chỉ xem kế hoạch phù hợp, hoặc xem toàn bộ bốn thang điểm.</li>
+        <li>Học theo thứ tự ưu tiên và các bước đề xuất. Tiếp tục làm bài trong chat để hệ thống cập nhật năng lực thực tế.</li>
+      </ol></div>
+      <label>Mục tiêu điểm
+        <select value={targetScore} onChange={event => setTargetScore(event.target.value)}>
+          <option value="">Xem tất cả thang điểm</option>
+          <option value="5">Đạt 5 điểm</option>
+          <option value="7">Đạt 7 điểm</option>
+          <option value="8.5">Đạt 8,5 điểm</option>
+          <option value="10">Hướng tới 10 điểm</option>
+        </select>
+      </label>
+      <small>Lộ trình dựa trên câu thi đã duyệt của hai kỳ thi hoàn tất gần nhất và hồ sơ năng lực tích lũy từ hoạt động học của bạn.</small>
+    </section>
+    {!plan && !error && <p>Đang phân tích các câu hỏi đã duyệt của hai kỳ thi hoàn tất gần nhất…</p>}
+    {error && <div className="error-banner">{error}</div>}
+    {research && <>
+      <section className={`research-summary ${research.status}`}>
+        <div><strong>{research.status === 'ready' ? `Phân tích ${research.years.join('–')}` : research.status === 'partial' ? 'Dữ liệu một năm' : 'Chưa đủ dữ liệu'}</strong><span>{research.approved_question_count} câu đã duyệt</span></div>
+        <small>Cập nhật {new Date(research.generated_at).toLocaleString('vi-VN')} · {research.timezone}</small>
+        {research.notes.map((note, index) => <p key={index}>{note}</p>)}
+      </section>
+      {research.skills.length > 0 && <section className="exam-distribution"><h3>Phân bổ kiến thức</h3>{research.skills.slice(0, 8).map(skill => <div key={skill.skill_id}><span>{skill.title}</span><i><b style={{ width: `${Math.max(3, skill.weighted_prevalence * 100)}%` }} /></i><strong>{Math.round(skill.weighted_prevalence * 100)}%</strong><small>Độ khó {skill.average_difficulty}/5</small></div>)}</section>}
+      {research.sources.length > 0 && <section className="exam-sources"><h3>Nguồn đề</h3>{research.sources.map(source => <a key={source.url} href={source.url} target="_blank" rel="noreferrer">{source.exam_year} · {source.publisher}</a>)}</section>}
+      <div className="score-band-list">{plan.score_bands.map(item => <article key={item.band}>
+        <header><strong>{item.band} điểm</strong><span>Mastery mục tiêu {Math.round(item.target_mastery * 100)}%</span></header>
+        <small>Trọng tâm: {item.cognitive_focus.join(', ')} · cá nhân hóa {Math.round(item.personalization_confidence * 100)}%</small>
+        <ol>{item.priorities.slice(0, 4).map(priority => <li key={priority.skill_id}><b>{priority.title}</b><span>{priority.reason}</span></li>)}</ol>
+        <details><summary>Các bước thực hiện</summary><ul>{item.steps.map((step, index) => <li key={index}>{step}</li>)}</ul></details>
+      </article>)}</div>
+    </>}
+  </section></div>
+}
 
-  // ── Submit ─────────────────────────────────────────────────────────────────
-  const handleSubmit = async () => {
-    const hasContent = input.trim() || attachedImage
-    if (!hasContent || isStreaming || isUploading) return
-
-    let message = input.trim()
-    if (attachedImage) {
-      message = message ? `${message}\n\nImage: ${attachedImage.serverPath}` : `Image: ${attachedImage.serverPath}`
-    }
-
-    // Add user message to history
-    setChatHistory(h => [...h, {
-      role: 'user',
-      text: input.trim() || '(image)',
-      imagePreview: attachedImage?.previewUrl,
-    }])
-    setInput('')
-    clearImageAfterSend()  // don't revoke — URL is now owned by chatHistory
-
-    // Reset agent activity for this turn
-    setAgentData({})
-    setAgentOrder([])
-    streamingTextRef.current = ''
-    setStreamingText('')
-    setErrorMsg('')
-    setIsStreaming(true)
-    agentTextAccumRef.current = {}
-
+export default function App() {
+  const [authSession, setAuthSession] = useState(supabase ? null : { user: { email: 'dev@local' } })
+  const [loadingAuth, setLoadingAuth] = useState(Boolean(supabase))
+  const [subject, setSubject] = useState('math')
+  const [messages, setMessages] = useState([])
+  const [input, setInput] = useState('')
+  const [asset, setAsset] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [hasStreamingToken, setHasStreamingToken] = useState(false)
+  const [stages, setStages] = useState([])
+  const [problem, setProblem] = useState(null)
+  const [hintLevel, setHintLevel] = useState(0)
+  const [citations, setCitations] = useState([])
+  const [mastery, setMastery] = useState([])
+  const [masterySummary, setMasterySummary] = useState(null)
+  const [recommendations, setRecommendations] = useState([])
+  const [selectedKnowledgeDocuments, setSelectedKnowledgeDocuments] = useState(() => {
     try {
-      const response = await fetch('/api/stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, session_id: sessionId }),
-      })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop()
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try { handleEvent(JSON.parse(line.slice(6))) } catch { /* skip */ }
-          }
-        }
-      }
-    } catch (err) {
-      setErrorMsg(err.message)
+      const stored = JSON.parse(localStorage.getItem(KNOWLEDGE_SELECTION_KEY) || '[]')
+      return Array.isArray(stored) ? stored.filter(item => typeof item === 'string') : []
+    } catch (_error) {
+      return []
     }
+  })
+  const [error, setError] = useState('')
+  const [showKnowledge, setShowKnowledge] = useState(false)
+  const [showHistory, setShowHistory] = useState(false)
+  const [showExamPlan, setShowExamPlan] = useState(false)
+  const fileRef = useRef(null)
+  const endRef = useRef(null)
+  const currentSession = useRef(sessionId())
 
-    setIsStreaming(false)
+  const loadSession = useCallback(async (selectedSessionId) => {
+    currentSession.current = selectedSessionId
+    localStorage.setItem(SESSION_KEY, selectedSessionId)
+    setStages([]); setCitations([]); setProblem(null); setHintLevel(0); setError('')
+    const response = await apiFetch(`/api/history/${selectedSessionId}`)
+    const payload = await response.json()
+    setMessages(Array.isArray(payload.messages) ? payload.messages.map(item => ({ role: item.role, text: item.content, visualization: item.metadata?.visualization || null })) : [])
+    if (payload.problem) setProblem(payload.problem)
+    setHintLevel(payload.hint_level || 0)
+  }, [])
+
+  useEffect(() => {
+    if (!supabase) return
+    supabase.auth.getSession().then(({ data }) => { setAuthSession(data.session); setLoadingAuth(false) })
+    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => setAuthSession(nextSession))
+    return () => data.subscription.unsubscribe()
+  }, [])
+
+  const loadProfile = useCallback(async () => {
+    if (!authSession) return
+    const [masteryResponse, recResponse] = await Promise.all([apiFetch('/api/me/mastery'), apiFetch('/api/me/recommendations')])
+    const masteryPayload = await masteryResponse.json()
+    setMastery(masteryPayload.items)
+    setMasterySummary(masteryPayload.summary)
+    setRecommendations((await recResponse.json()).items)
+  }, [authSession])
+  useEffect(() => { loadProfile().catch(err => setError(err.message)) }, [loadProfile])
+  useEffect(() => {
+    localStorage.setItem(KNOWLEDGE_SELECTION_KEY, JSON.stringify(selectedKnowledgeDocuments))
+  }, [selectedKnowledgeDocuments])
+  useEffect(() => {
+    if (!authSession) return
+    loadSession(currentSession.current).catch(err => setError(err.message))
+  }, [authSession, loadSession])
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, busy])
+
+  const upload = async (file) => {
+    if (!file) return
+    setError('')
+    assertUploadSize(file)
+    const form = new FormData(); form.append('file', file)
+    const response = await apiFetch('/api/uploads', { method: 'POST', body: form })
+    const payload = await response.json()
+    setAsset({ ...payload, name: file.name, localPreview: URL.createObjectURL(file) })
   }
 
-  const onKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSubmit() }
+  const handleEvent = (event) => {
+    if (event.type === 'stage') setStages(current => [...current, event])
+    if (event.type === 'problem_extracted') setProblem(event.problem)
+    if (event.type === 'citation') setCitations(current => current.some(item => item.url === event.url) ? current : [...current, event])
+    if (event.type === 'visualization' && event.success) {
+      setHasStreamingToken(true)
+      setMessages(current => {
+        const last = current[current.length - 1]
+        if (last?.role === 'assistant' && last.streaming) {
+          return [...current.slice(0, -1), { ...last, visualization: event }]
+        }
+        return [...current, { role: 'assistant', text: '', visualization: event, streaming: true }]
+      })
+    }
+    if (event.type === 'token') {
+      setHasStreamingToken(true)
+      setMessages(current => {
+        const last = current[current.length - 1]
+        if (last?.role === 'assistant' && last.streaming) {
+          return [...current.slice(0, -1), { ...last, text: `${last.text}${event.content || ''}` }]
+        }
+        return [...current, { role: 'assistant', text: event.content || '', streaming: true }]
+      })
+    }
+    if (event.type === 'hint' || event.type === 'feedback') {
+      setHintLevel(event.hint_level || 0)
+      setMessages(current => {
+        const last = current[current.length - 1]
+        if (last?.role === 'assistant' && last.streaming) {
+          return [...current.slice(0, -1), { ...last, role: 'assistant', text: event.message, streaming: false }]
+        }
+        if (last?.role === 'assistant' && last.text === event.message) return current
+        return [...current, { role: 'assistant', text: event.message }]
+      })
+      setHasStreamingToken(false)
+    }
+    if (event.type === 'mastery_updated') setMastery(current => [...current.filter(item => item.skill_id !== event.skill_id), { ...event, mastery: event.new_mastery }])
+    if (event.type === 'recommendations_updated') setRecommendations(event.recommendations)
+    if (event.type === 'error') setError(event.content)
+    if (event.type === 'done') {
+      setHasStreamingToken(false)
+      setMessages(current => current.map(item => item.streaming ? { ...item, streaming: false } : item))
+      loadProfile().catch(err => setError(err.message))
+    }
   }
 
-  const newChat = () => {
-    // New UUID = new LangGraph thread = agent starts fresh
-    const id = genSessionId()
-    localStorage.setItem(_LS_KEY, id)
-    setSessionId(id)
-    setChatHistory([])
-    setAgentData({})
-    setAgentOrder([])
-    setStreamingText('')
-    setErrorMsg('')
+  const send = async () => {
+    if (busy || (!input.trim() && !asset)) return
+    const visibleText = input.trim() || 'Phân tích bài trong ảnh này.'
+    const requestText = `Môn ${SUBJECT_LABEL[subject]}. ${visibleText}`
+    setMessages(current => [...current, { role: 'user', text: visibleText, image: asset?.localPreview }])
+    setInput(''); setBusy(true); setHasStreamingToken(false); setStages([]); setError('')
+    const attachmentIds = asset ? [asset.asset_id] : []
+    setAsset(null)
+    try {
+      const request = {
+        session_id: currentSession.current,
+        request_id: crypto.randomUUID(),
+        message: requestText,
+        display_message: visibleText,
+        attachment_ids: attachmentIds,
+        knowledge_document_ids: selectedKnowledgeDocuments,
+        subject,
+      }
+      try {
+        await streamTutorWebSocket(request, handleEvent)
+      } catch (socketError) {
+        if (!socketError.canFallback) throw socketError
+        await streamTutorSse(request, handleEvent)
+      }
+    } catch (err) { setError(err.message) } finally { setBusy(false) }
   }
 
-  const subAgents = agentOrder.filter(n => n !== 'supervisor')
-  const canSend = (input.trim() || attachedImage) && !isStreaming && !isUploading
+  const newSession = () => {
+    currentSession.current = crypto.randomUUID(); localStorage.setItem(SESSION_KEY, currentSession.current)
+    setMessages([]); setStages([]); setProblem(null); setCitations([]); setHintLevel(0); setHasStreamingToken(false)
+    setShowHistory(false)
+  }
+
+  if (loadingAuth) return <div className="loading-screen">Đang khởi tạo…</div>
+  if (!authSession) return <Login />
 
   return (
-    <div className="layout">
-
-      {/* Header */}
-      <header className="topbar">
-        <div className="topbar-brand">
-          <span className="brand-icon">🤖</span>
-          <span className="brand-name">Visual Agent System</span>
-        </div>
-        <div className="topbar-right">
-          {isStreaming && (
-            <div className="streaming-indicator">
-              <span className="dot-pulse" />
-              <span>Streaming</span>
-            </div>
-          )}
-          <button className="new-chat-btn" onClick={newChat} title="New chat">
-            ✏️ New chat
-          </button>
-        </div>
-      </header>
-
-      {/* Panels */}
-      <div className="panels">
-
-        {/* Left — Agent Activity */}
-        <section className="panel panel-agents">
-          <div className="panel-title">
-            <span>Agent Activity</span>
-            {subAgents.length > 0 && <span className="badge">{subAgents.length}</span>}
-          </div>
-          <div className="panel-body">
-            {subAgents.length === 0
-              ? <p className="empty">Agent activity streams here during inference…</p>
-              : subAgents.map(name => (
-                  <AgentCard key={name} name={name}
-                    sections={agentData[name]?.sections ?? []}
-                    isActive={agentData[name]?.isActive ?? false} />
-                ))
-            }
-          </div>
-        </section>
-
-        {/* Right — Chat thread */}
-        <section className="panel panel-chat">
-          <div className="panel-title">
-            <span>Conversation</span>
-            {chatHistory.length > 0 && (
-              <span className="badge">{Math.ceil(chatHistory.length / 2)} turn{chatHistory.length > 2 ? 's' : ''}</span>
-            )}
-          </div>
-          <div className="panel-body chat-body">
-            {chatHistory.length === 0 && !streamingText && !isStreaming && (
-              <div className="chat-empty">
-                <span className="chat-empty-icon">💬</span>
-                <p>Start a conversation — ask a research question or attach an image.</p>
-              </div>
-            )}
-
-            {chatHistory.map((msg, i) => <ChatMessage key={i} msg={msg} />)}
-
-            {/* Streaming assistant reply */}
-            {(isStreaming || streamingText) && (
-              <div className="chat-msg assistant">
-                <div className="chat-avatar">🤖</div>
-                <div className="chat-bubble">
-                  {streamingText
-                    ? (
-                      <div className="response-markdown">
-                        <MarkdownStream>{streamingText}</MarkdownStream>
-                        {isStreaming && <span className="cursor">▊</span>}
-                      </div>
-                    )
-                    : <span className="thinking">thinking…</span>
-                  }
-                </div>
-              </div>
-            )}
-
-            <div ref={chatEndRef} />
-          </div>
-        </section>
-      </div>
-
-      {/* Error banner */}
-      {errorMsg && (
-        <div className="error-banner">
-          ⚠️ {errorMsg}
-          <button className="error-close" onClick={() => setErrorMsg('')}>✕</button>
-        </div>
-      )}
-
-      {/* Input bar */}
-      <footer className="inputbar">
-        {attachedImage && (
-          <div className="image-preview-strip">
-            <img src={attachedImage.previewUrl} alt="preview" className="preview-thumb" />
-            <div className="preview-info">
-              <span className="preview-name">{attachedImage.name}</span>
-              <span className="preview-hint">will be sent with your message</span>
-            </div>
-            <button className="preview-remove" onClick={removeImage}>✕</button>
-          </div>
-        )}
-        <div className="input-row">
-          <button className="attach-btn" onClick={() => fileInputRef.current?.click()}
-            disabled={isStreaming || isUploading} title="Attach image (or paste / drag-and-drop)">
-            {isUploading ? <span className="spinner small" /> : (
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                <circle cx="8.5" cy="8.5" r="1.5" />
-                <polyline points="21 15 16 10 5 21" />
-              </svg>
-            )}
-          </button>
-          <input ref={fileInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleFileChange} />
-          <textarea className="input-field" value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={onKeyDown} onPaste={handlePaste}
-            onDrop={handleDrop} onDragOver={e => e.preventDefault()}
-            placeholder={attachedImage ? 'Add a message or just send the image…' : 'Ask anything… follow-ups work too'}
-            rows={2} disabled={isStreaming} />
-          <button className="send-btn" onClick={handleSubmit} disabled={!canSend}>
-            {isStreaming ? <span className="spinner" /> : (
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <line x1="22" y1="2" x2="11" y2="13" />
-                <polygon points="22 2 15 22 11 13 2 9 22 2" />
-              </svg>
-            )}
-          </button>
-        </div>
-      </footer>
+    <div className="app-shell"><header className="topbar"><div className="brand"><span>ST</span><div><b>STEM Tutor</b><small>CTGDPT 2018 · Lớp 12</small></div></div>
+      <nav>{SUBJECTS.map(item => <button key={item.id} className={subject === item.id ? 'active' : ''} onClick={() => setSubject(item.id)}><i>{item.icon}</i>{item.label}</button>)}</nav>
+      <div className="account-actions"><button onClick={() => setShowExamPlan(true)}>Lộ trình điểm</button><button onClick={() => setShowKnowledge(true)}>Học liệu</button><button onClick={() => setShowHistory(true)}>Lịch sử</button><button onClick={newSession}>Phiên mới</button>{supabase && <button onClick={() => supabase.auth.signOut()}>Đăng xuất</button>}</div></header>
+      <div className="workspace"><ProgressPanel stages={stages} problem={problem} hintLevel={hintLevel} citations={citations} />
+        <main className="chat-panel"><header><span className="subject-icon">{SUBJECTS.find(item => item.id === subject)?.icon}</span><div><h1>Học {SUBJECT_LABEL[subject]}</h1><p>Hãy gửi đề và cách bạn đã thử. Mình sẽ gợi mở từng bước.</p></div></header>
+          <section className="messages">{messages.length === 0 && <div className="welcome"><span>✦</span><h2>Bắt đầu từ một bài bạn đang vướng</h2><p>Chụp rõ toàn bộ đề, hoặc nhập câu hỏi và phần bạn đã làm.</p></div>}
+            {messages.map((message, index) => <article className={`message ${message.role}`} key={index}><span>{message.role === 'user' ? 'Bạn' : 'ST'}</span><div>{message.image && <img src={message.image} alt="Bài tập đã gửi" />}{message.visualization && <AuthenticatedVideo visualization={message.visualization} />}<Markdown>{message.text}</Markdown></div></article>)}
+            {busy && !hasStreamingToken && <article className="message assistant"><span>ST</span><div className="typing"><i /><i /><i /></div></article>}<div ref={endRef} /></section>
+          {error && <div className="error-banner">{error}<button onClick={() => setError('')}>×</button></div>}
+          <footer className="composer">{asset && <div className="attachment"><img src={asset.localPreview} alt="preview" /><span>{asset.name}</span><button onClick={() => setAsset(null)}>×</button></div>}
+            <div><button className="attach" onClick={() => fileRef.current?.click()} aria-label="Đính kèm ảnh">＋</button><input ref={fileRef} hidden type="file" accept="image/*" onChange={e => upload(e.target.files?.[0]).catch(err => setError(err.message))} />
+              <textarea value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} placeholder="Bạn đã thử bước nào?" />
+              <button className="send" onClick={send} disabled={busy || (!input.trim() && !asset)}>Gửi</button></div><small>Ảnh tối đa 25 MB. Trợ giảng có thể mắc lỗi; hãy kiểm tra công thức và nguồn trước khi sử dụng.</small></footer>
+        </main><MasteryPanel mastery={mastery} summary={masterySummary} recommendations={recommendations} /></div>
+      {showKnowledge && <KnowledgePanel subject={subject} selectedDocumentIds={selectedKnowledgeDocuments} onSelectionChange={setSelectedKnowledgeDocuments} onClose={() => setShowKnowledge(false)} />}
+      {showHistory && <ChatHistoryPanel currentSessionId={currentSession.current} onClose={() => setShowHistory(false)} onSelect={session => {
+        if (session.subject) setSubject(session.subject)
+        loadSession(session.session_id).then(() => setShowHistory(false)).catch(err => setError(err.message))
+      }} />}
+      {showExamPlan && <ExamPlanPanel subject={subject} onClose={() => setShowExamPlan(false)} />}
     </div>
   )
 }

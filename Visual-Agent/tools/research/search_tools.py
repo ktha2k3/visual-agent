@@ -1,19 +1,26 @@
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-import arxiv as _arxiv
-import wikipedia as _wiki_pkg
-from langchain_community.tools import WikipediaQueryRun
-from langchain_community.utilities import WikipediaAPIWrapper
 from langchain_core.tools import tool
+from utils.config import get_settings
 
 
-# ── arXiv ─────────────────────────────────────────────────────────────────────
-_arxiv_client = _arxiv.Client()
-
+@tool
+def current_datetime() -> str:
+    """Return the application's current local date, time, timezone, and UTC offset."""
+    timezone_name = get_settings().app_timezone
+    current = datetime.now(ZoneInfo(timezone_name))
+    return current.isoformat() + f" ({timezone_name})"
 
 @tool
 def arxiv(query: str) -> str:
     """Search for research papers on arXiv. Input should be a plain-text search query."""
+    try:
+        import arxiv as _arxiv
+    except ImportError:
+        return "arXiv integration is not installed."
+    arxiv_client = _arxiv.Client()
     search = _arxiv.Search(
         query=query,
         max_results=5,
@@ -21,7 +28,7 @@ def arxiv(query: str) -> str:
     )
     for attempt in range(3):
         try:
-            results = list(_arxiv_client.results(search))
+            results = list(arxiv_client.results(search))
             if not results:
                 return "No papers found for that query."
             parts = []
@@ -45,10 +52,19 @@ def arxiv(query: str) -> str:
     return "arXiv search failed."
 
 
-# ── Wikipedia ─────────────────────────────────────────────────────────────────
-_wiki_pkg.set_user_agent("LiAn-Visual-Agent/0.1 (contact: trankimquang1603@gmail.com)")
-
-wikipedia = WikipediaQueryRun(
-    api_wrapper=WikipediaAPIWrapper(top_k_results=2, doc_content_chars_max=2000),
-    description="Search Wikipedia for factual information. Input should be a search query.",
-)
+@tool
+def wikipedia(query: str) -> str:
+    """Search Wikipedia for optional background information, never exam statistics."""
+    try:
+        import wikipedia as wiki_package
+        from langchain_community.tools import WikipediaQueryRun
+        from langchain_community.utilities import WikipediaAPIWrapper
+    except ImportError:
+        return "Wikipedia integration is not installed."
+    wiki_package.set_user_agent(
+        "LiAn-Visual-Agent/0.1 (contact: trankimquang1603@gmail.com)"
+    )
+    runner = WikipediaQueryRun(
+        api_wrapper=WikipediaAPIWrapper(top_k_results=2, doc_content_chars_max=2000)
+    )
+    return runner.invoke(query)

@@ -1,280 +1,149 @@
-# Hệ Thống Visual Agent
+# Visual-Agent · Trợ giảng STEM lớp 12
 
-Đây là một hệ thống AI đa tác tử được xây dựng trên [LangGraph](https://github.com/langchain-ai/langgraph), kết hợp **Research Agent** (arXiv + Wikipedia) và **Vision Agent** (mô tả ảnh + phát hiện đối tượng bằng YOLO), được điều phối bởi một **Supervisor** để định tuyến tác vụ và tổng hợp câu trả lời. Dự án đi kèm giao diện React hỗ trợ streaming.
+Visual-Agent là trợ giảng tự học đa phương thức cho Toán, Vật lí, Hóa học và Sinh học theo CTGDPT 2018. Học sinh có thể chụp đề, kiểm tra bản chép, nhận gợi ý Socrates theo từng mức và theo dõi năng lực theo chủ đề.
 
----
+## Kiến trúc
 
-## Kiến Trúc Hệ Thống
+- React/Vite: đăng nhập magic link, workspace học, hint ladder, nguồn, mastery và upload học liệu riêng.
+- FastAPI/SSE: API xác thực, upload private và event học tập; không phát chain-of-thought.
+- LangGraph 1.x: `perception → visualization decision/tool → retrieval → tutor → assessment → mastery`.
+- Math-To-Manim tool: ưu tiên tạo animation cho câu hỏi khái niệm, công thức, định luật và hiện tượng Toán/Vật lí; scene được kiểm tra AST, render thật và tự sửa có giới hạn.
+- Exam Research Agent: lấy thời gian hiện tại, phân tích câu đã duyệt của hai kỳ thi hoàn tất gần nhất và chuyển báo cáo có cấu trúc cho Learning Path Supervisor.
+- Ollama Cloud trực tiếp qua `https://ollama.com/v1`: cấu hình riêng tutor, vision và research.
+- Supabase: Auth/JWKS, PostgreSQL, pgvector, private Storage và RLS theo `auth.uid()`.
+- Redis: checkpoint ngắn hạn và hàng đợi RQ; worker đồng bộ nguồn đề, scheduler quét hàng tuần và dọn upload hết hạn.
 
-```
-Người dùng (Frontend)
-      │
-      ▼  HTTP POST /api/stream  (Server-Sent Events)
-┌─────────────────────────────────┐
-│         FastAPI  (api.py)       │
-└────────────────┬────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────┐
-│       Supervisor Agent          │  ← kimi-k2.5:cloud qua Ollama
-│ (đồ thị Supervisor của LangGraph)│
-└────────┬────────────────┬───────┘
-         │                │
-         ▼                ▼
-┌────────────────┐  ┌─────────────────┐
-│ Research Agent │  │  Vision Agent   │  ← được gọi khi cần
-│ gpt-oss:120b   │  │  gemma4:31b     │
-└───────┬────────┘  └────────┬────────┘
-        │                    │
-   ┌────┴────┐         ┌─────┴───────────┐
-   │ arxiv   │         │ describe_image  │
-   │wikipedia│         │ detect (YOLOv11x)│
-   └─────────┘         └─────────────────┘
-```
+Research Agent và YOLO vẫn nằm trong codebase như công cụ mở rộng, nhưng không thuộc đường chạy mặc định của trợ giảng.
 
-### Vai trò của các agent
+## Chạy local
 
-| Agent | Model | Trách nhiệm |
-|---|---|---|
-| **Supervisor** | kimi-k2.5:cloud | Định tuyến yêu cầu, tổng hợp câu trả lời cuối cùng |
-| **Research Agent** | gpt-oss:120b-cloud | Tìm kiếm bài báo trên arXiv và bài viết trên Wikipedia |
-| **Vision Agent** | gemma4:31b-cloud | Mô tả ảnh, phát hiện và đếm đối tượng (YOLOv11x) |
+Yêu cầu Python 3.11–3.12, Node.js 22, Ollama Cloud API key và Manim CE 0.19+; FFmpeg/LaTeX được khuyến nghị và đã có trong Docker image. Khi local chưa có LaTeX, code generator dùng `Text` cho công thức để vẫn render được. Redis/Supabase là tùy chọn cho local.
 
-Tất cả model được phục vụ cục bộ qua **Ollama** tại `http://localhost:11434`.
-
----
-
-## Cấu Trúc Dự Án
-
-```
-Visual-Agent/
-├── agents/                    # Chỉ chứa định nghĩa agent
-│   ├── supervisor_agent.py    # Supervisor — định tuyến và tổng hợp
-│   ├── research_agent.py      # Research agent
-│   └── vision_agent.py        # Vision agent
-│
-├── tools/                     # Cài đặt tool (mỗi file một trách nhiệm)
-│   ├── research/
-│   │   └── search_tools.py    # Tool arxiv + wikipedia
-│   └── vision/
-│       ├── describe_tool.py   # Mô tả ảnh qua multimodal LLM
-│       └── detect_tool.py     # Phát hiện đối tượng qua YOLOv11x
-│
-├── utils/                     # Tiện ích dùng chung
-│   ├── pretty_print.py        # Format debug output
-│   └── inference.py           # Hỗ trợ chạy từ CLI
-│
-├── models/
-│   └── yolo11x.pt             # Trọng số YOLOv11x (được track bằng Git LFS)
-│
-├── assets/                    # Ảnh mẫu để test
-│
-├── frontend/                  # Giao diện React + Vite
-│   ├── src/
-│   │   ├── App.jsx            # Panel hoạt động agent + panel phản hồi Supervisor
-│   │   └── App.css
-│   ├── nginx.conf             # Cấu hình reverse-proxy cho Docker
-│   └── Dockerfile
-│
-├── api.py                     # Server FastAPI với SSE streaming
-├── main.py                    # Điểm vào CLI
-├── Dockerfile.backend
-├── docker-compose.yml
-└── requirements.txt
-```
-
----
-
-## Yêu Cầu Trước Khi Chạy
-
-| Thành phần | Phiên bản |
-|---|---|
-| Python | 3.11 + |
-| Node.js | 18 + |
-| [Ollama](https://ollama.com) | mới nhất |
-| Docker + Docker Compose | tùy chọn |
-
-### Tải các model Ollama cần thiết
-
-```bash
-ollama signin
-ollama pull kimi-k2.5:cloud
-ollama pull gpt-oss:120b-cloud
-ollama pull gemma4:31b-cloud
-```
-
----
-
-## Thiết Lập Môi Trường
-
-Tạo file `.env` ở thư mục gốc của dự án (file này đã được git ignore):
-
-```env
-# Ollama
-OLLAMA_API_KEY=ollama
-# Ghi đè khi chạy trong Docker (container không truy cập được localhost)
-# OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
-
-# Tùy chọn — tìm kiếm web bằng Tavily
-TAVILY_API_KEY=your_tavily_key
-
-# Tùy chọn — trace bằng LangSmith
-LANGSMITH_TRACING=true
-LANGSMITH_ENDPOINT=https://api.smith.langchain.com
-LANGSMITH_API_KEY=your_langsmith_key
-LANGSMITH_PROJECT=visual-agent
-
-# Tùy chọn — ghi đè đường dẫn model YOLO (mặc định: models/yolo11x.pt)
-# YOLO_MODEL_PATH=models/yolo11x.pt
-```
-
----
-
-## Chạy Hệ Thống
-
-### Cách A — Phát triển cục bộ (khuyến nghị khi đang chỉnh sửa)
-
-**1. Cài dependency Python**
-
-```bash
+```powershell
+Copy-Item .env.example .env
 python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-```
-
-**2. Khởi động backend**
-
-```bash
 uvicorn api:app --reload --port 8000
 ```
 
-**3. Khởi động frontend**
+Ở terminal khác:
 
-```bash
-cd frontend
-npm install
+```powershell
+Set-Location frontend
+npm ci
 npm run dev
 ```
 
-Mở [http://localhost:5173](http://localhost:5173).
+Khi chưa cấu hình Supabase và `AUTH_REQUIRED=false`, API dùng một tài khoản dev cục bộ. Không dùng chế độ này trên môi trường public.
 
----
+Khi gọi trực tiếp Ollama Cloud, dùng model tag `gemma4:31b`, `gpt-oss:120b` — không thêm hậu tố `-cloud`. Hậu tố đó chỉ dành cho đường chạy qua daemon Ollama local đã đăng nhập. Chat/vision tiếp tục dùng Cloud; embeddings dùng `nomic-embed-text` 768 chiều qua Ollama local tại `http://127.0.0.1:11434/v1`. Nếu daemon local tạm unavailable, ingestion vẫn lưu chunk và tự fallback sang lexical retrieval.
 
-### Cách B — Docker compose (Recommend for test)
+Visualization dùng `VISUALIZATION_MODEL` (mặc định `OLLAMA_MODEL=gemma4:31b-cloud`). Model factory tự bỏ hậu tố `-cloud` khi gọi trực tiếp `https://ollama.com/v1`; credential chỉ đọc từ `OLLAMA_API_KEY`. Artifact được lưu persistent dưới `VISUALIZATION_ARTIFACT_DIR`, cache theo `normalized_question + subject + model + VISUALIZATION_VERSION`, và retry tối đa `MAX_RENDER_RETRIES`.
 
-```bash
-docker compose up --build -d
-cd frontend
-npm install
-npm run dev
-```
+## Thiết lập Supabase
 
-Mở [http://localhost:5173](http://localhost:5173).
+1. Tạo project Supabase và chạy toàn bộ migration trong [supabase/migrations](supabase/migrations) theo thứ tự tên file.
+2. Điền `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, đặt `AUTH_REQUIRED=true`.
+3. Tạo `frontend/.env.local` với `VITE_SUPABASE_URL` và `VITE_SUPABASE_PUBLISHABLE_KEY`.
+4. Thêm email giáo viên vào `ADMIN_EMAILS`.
 
----
+Service-role key chỉ được dùng ở backend/worker. Bucket `uploads` là private, URL xem trước hết hạn sau 15 phút và job retention xóa tài sản sau 30 ngày.
 
-## Tài Liệu API
+## API chính
 
-### `POST /api/stream`
-
-Stream hoạt động của agent dưới dạng [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events).
-
-**Request body**
-
-```json
-{ "message": "Có bao nhiêu người trong ảnh assets/image.png?" }
-```
-
-**Các loại event**
-
-| `type` | Trường dữ liệu | Mô tả |
+| Method | Endpoint | Chức năng |
 |---|---|---|
-| `agent_start` | `agent` | Một agent/node bắt đầu hoạt động |
-| `token` | `agent`, `content` | Token văn bản được stream ra |
-| `tool_call` | `agent`, `tool`, `args` | Agent đang gọi một tool |
-| `tool_result` | `agent`, `tool`, `content` | Tool đã trả kết quả |
-| `handoff` | `agent`, `tool` | Điều hướng nội bộ giữa các agent (UI bỏ qua) |
-| `error` | `content` | Có exception xảy ra |
-| `done` | `supervisor_responded` | Stream hoàn tất |
+| `GET` | `/api/me` | Danh tính và quyền admin |
+| `POST` | `/api/uploads` | Upload ảnh thật ≤25 MB, trả `asset_id` |
+| `POST` | `/api/knowledge` | Stage tài liệu riêng ≤25 MB, trả `202` và `job_id`; worker tự chunk/embedding ở nền |
+| `GET` | `/api/knowledge/jobs` | Danh sách tiến trình ingestion thuộc user hiện tại |
+| `GET` | `/api/knowledge/jobs/{job_id}` | Trạng thái một job thuộc user hiện tại |
+| `GET` | `/api/knowledge/documents` | Danh mục tài liệu đã lưu cùng số chunks thực tế |
+| `POST` | `/api/webhooks/knowledge-uploaded` | Webhook HMAC idempotent để kích hoạt job sau sự kiện upload |
+| `GET` | `/api/chat/sessions` | Danh sách phiên chat persistent để mở lại trên UI |
+| `POST` | `/api/tutor/stream` | SSE stream token realtime, stage, extraction, feedback, citation và mastery |
+| `WS` | `/api/tutor/ws` | WebSocket JSON stream; gửi JWT và tutor request trong frame đầu tiên |
+| `GET` | `/api/history/{session_id}` | Khôi phục problem, hint level và buffer hội thoại của phiên |
+| `GET` | `/api/visualizations/{artifact_id}/video` | Stream MP4 thuộc user hiện tại |
+| `GET` | `/api/visualizations/{artifact_id}/scene` | Tải source Manim thuộc user hiện tại |
+| `GET` | `/api/me/mastery` | Hồ sơ năng lực 0–1 |
+| `GET` | `/api/me/recommendations` | Chủ đề ưu tiên cá nhân hóa |
+| `GET` | `/api/me/exam-plan/{subject}` | Phân bổ đề hai năm và lộ trình cá nhân hóa theo bốn thang điểm |
+| `DELETE` | `/api/me` | Xóa tài sản private và dữ liệu học tập |
+| `POST` | `/api/admin/content` | Adapter text-only cũ, deprecated; dùng `/api/knowledge` |
+| `POST` | `/api/admin/exam-sync` | Đưa job đồng bộ nguồn đề vào RQ |
+| `GET/PATCH` | `/api/admin/review-queue` | Duyệt dữ liệu OCR trước khi publish |
 
-**Test nhanh bằng curl**
+`POST /api/stream` là adapter deprecated trong một phiên bản để UI cũ tiếp tục nhận `agent_start`, `token`, `error`, `done`.
 
-```bash
-curl -X POST http://localhost:8000/api/stream \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Các bài báo mới nhất về kiến trúc transformer"}' \
-  --no-buffer
+Tutor memory giữ tối đa 24 message cho mỗi key `user_id:session_id`. Khi có `REDIS_URL`, checkpoint tồn tại qua restart; nếu Redis chưa được cấu hình, backend dùng memory nội bộ và lịch sử mất khi process khởi động lại. Frontend ưu tiên WebSocket và fallback về SSE nếu chưa thiết lập được kết nối.
+
+Lịch sử chat hiển thị được lưu riêng khỏi checkpoint: production dùng bảng Supabase `chat_messages` (migration `202608250001_persistent_chat_history.sql`), còn local development dùng SQLite tại `CHAT_DATABASE_PATH` (`data/chat_history.sqlite3` mặc định). Mỗi cặp user/assistant được upsert theo `user_id + session_id + request_id + role`, nên retry không tạo message trùng. Redis chỉ còn giữ state thực thi ngắn hạn của graph.
+
+Kho knowledge cũng thuộc sở hữu user: API chỉ staging file và trả về ngay; event upload tự kích hoạt queue `knowledge-ingestion` (hoặc background fallback khi Redis không có). UI poll trạng thái bền vững nên người dùng có thể đóng panel và tiếp tục chat. Worker kiểm tra nội dung, trích text rồi chia đoạn tối đa 1.200 ký tự. Production lưu job/document/chunk và vector trong PostgreSQL/pgvector với RLS; local lưu bền vững trong cùng SQLite. Tutor chỉ truy xuất chunk của chính user và corpus global đã duyệt, không đọc học liệu riêng của tài khoản khác. Khi embedding endpoint chưa sẵn sàng, ingestion vẫn hoàn tất và retrieval dùng lexical fallback.
+
+Webhook nhận JSON `{"job_id":"..."}` và yêu cầu header `X-Knowledge-Signature: sha256=<HMAC_SHA256(raw_body, KNOWLEDGE_WEBHOOK_SECRET)>`. Claim trạng thái `pending → processing` là atomic nên callback lặp lại không tạo document trùng.
+
+Research Agent không dùng Wikipedia/arXiv để suy ra cấu trúc đề. Nó chỉ đọc `exam_questions` có `review_status=approved`, loại năm thi chưa hoàn tất theo `APP_TIMEZONE`, lấy tối đa hai năm gần nhất và ghi rõ coverage/nguồn. Supervisor kết hợp phân bổ 60% năm mới + 40% năm trước với mastery quan sát được để tạo lộ trình `0–5`, `5–7`, `7–8.5`, `8.5–10`; khi thiếu corpus đã duyệt, API trả `insufficient_data` thay vì sinh template.
+
+## Worker và Docker
+
+```powershell
+docker compose up --build
 ```
 
-### `GET /health`
+Compose khởi động backend, frontend, Redis, RQ worker và RQ scheduler. Registry outbound chỉ cho phép các host Bộ GDĐT/Cổng Chính phủ trong `EXAM_SOURCE_HOSTS`; mọi câu OCR bắt đầu ở trạng thái `pending`.
 
-```json
-{ "status": "ok" }
+## Kiểm thử
+
+```powershell
+python -m pytest -q
+Set-Location frontend
+npm audit --audit-level=high
+npm run build
 ```
 
----
+Các test hiện có bao phủ công thức mastery/recommendation, MIME/giải mã ảnh, SSRF allowlist, ingestion idempotent, validators STEM, nhánh clarification, API dev-auth, visualization routing, structured planner, AST gate, render repair, cache, ownership và text fallback. Các ngưỡng chất lượng trên golden set 100 ảnh và pilot học sinh cần dữ liệu/reviewer thật; chúng không được CI unit test tự tuyên bố là đã đạt.
 
-## Luồng Xử Lý Một Request
+## Luồng Math-To-Manim
 
-```
-1. Người dùng nhập tin nhắn trên UI
-2. Frontend gửi POST /api/stream
-3. Supervisor LLM quyết định gọi agent nào
-4. Sub-agent chạy (research hoặc vision) và gọi các tool tương ứng
-5. Sub-agent chuyển kết quả lại cho supervisor
-6. Supervisor tổng hợp câu trả lời cuối cùng
-7. Mọi bước đều được stream dưới dạng SSE và render theo thời gian thực trên UI
-```
+Thiết kế artifact chain, AST gate và bounded render-repair được tích hợp theo kiến trúc của [HarleyCoops/Math-To-Manim](https://github.com/HarleyCoops/Math-To-Manim) (MIT), nhưng dùng trực tiếp Tutor Graph, model factory và API ownership của Visual-Agent thay vì nhúng các silo CLI/MCP của repository gốc.
 
-**Bố cục UI:**
-
-```
-┌──────────────────────┬─────────────────────────┐
-│   Hoạt động Agent    │  Phản hồi Supervisor    │
-│                      │                         │
-│  🧠 Suy luận Agent   │  Câu trả lời cuối cùng  │
-│    └ tool call       │  được render dưới dạng  │
-│    └ tool result     │  Markdown               │
-│  🔧 Thực thi Tool    │                         │
-│  🔬 Research Agent   │                         │
-└──────────────────────┴─────────────────────────┘
-│  Nhập tin nhắn của bạn…               [Gửi]    │
-└─────────────────────────────────────────────────┘
+```text
+Câu hỏi
+  → education/tutor_graph.py: visualization_router
+  → tools/visualization/tool.py: visualize_stem_concept
+  → tools/visualization/provider.py: Ollama Cloud / Gemma 4
+  → tools/visualization/service.py: ConceptAnalysis + VisualizationPlan
+  → tools/visualization/validation.py: syntax/AST security gate
+  → tools/visualization/renderer.py: Manim subprocess
+  → data/visualizations/<cache-key>/: scene, stage JSON, manifest, logs, MP4
+  → api.py: WebSocket/SSE visualization event và protected artifact endpoint
+  → frontend/src/App.jsx: video trong hội thoại
 ```
 
----
+Gọi tool trực tiếp từ Python:
 
-## Hướng Dẫn Phát Triển
-
-### Thêm một tool mới
-
-1. Tạo file trong `tools/research/` hoặc `tools/vision/`.
-2. Gắn decorator `@tool` từ `langchain_core.tools` cho hàm của bạn.
-3. Thêm tool đó vào danh sách `tools=[...]` của agent tương ứng trong `agents/`.
-
-### Thêm một agent mới
-
-1. Định nghĩa agent trong `agents/your_agent.py` bằng `create_react_agent`.
-2. Import và đăng ký agent đó trong `agents/supervisor_agent.py` tại `agents=[...]`.
-3. Thêm một mục vào `AGENT_META` trong `frontend/src/App.jsx` để khai báo icon và màu hiển thị trên UI.
-
-### Đổi model
-
-Thay chuỗi `model=` trong file agent tương ứng rồi tải model mới:
-
-```bash
-ollama pull <ten-model-moi>
+```python
+result = await visualize_stem_concept(
+    "Giải thích F = ma", subject="physics", level="THPT lớp 12", user_id=user_id
+)
 ```
 
-### Bật LangSmith tracing
+Nếu planning, validation hoặc render thất bại, tool trả `success=false`; Tutor Graph vẫn chạy retrieval/tutor và trả giải thích văn bản thay vì làm hỏng phiên chat.
 
-Đặt `LANGSMITH_TRACING=true` và `LANGSMITH_API_KEY` trong `.env` để lấy đầy đủ
-trace thực thi LangGraph tại [smith.langchain.com](https://smith.langchain.com).
+## Cấu trúc mới
 
----
-
-## Demo
-
-[assets/demo_test.mp4](assets/demo_test.mp4)
-
-
+```text
+education/              domain model, curriculum, Tutor Graph, mastery, validators
+exam/                   source registry, fetch/OCR, jobs
+services/               auth, repository, private storage
+tools/visualization/     analyzer, planner, Manim codegen, validator, renderer, cache
+supabase/migrations/    schema, pgvector, RLS và taxonomy seed
+tests/                  test backend
+frontend/src/           workspace học sinh và admin review
+api.py                  FastAPI + SSE
+worker.py               RQ worker
+scheduler.py            lịch nguồn đề và retention
+```

@@ -1,26 +1,31 @@
-from agents.supervisor_agent import supervisor
+import uuid
 
+from langgraph.checkpoint.memory import MemorySaver
 
-def get_final_messages(last_chunk):
-    if last_chunk is None:
-        return []
-    if isinstance(last_chunk, tuple):
-        _, last_chunk = last_chunk
-    if isinstance(last_chunk, dict) and "supervisor" in last_chunk:
-        return last_chunk["supervisor"].get("messages", [])
-    if isinstance(last_chunk, dict):
-        for node_update in last_chunk.values():
-            if isinstance(node_update, dict) and "messages" in node_update:
-                return node_update["messages"]
-    return []
+from education.tutor_graph import build_tutor_graph
+from services.repository import MemoryRepository
+from services.storage import AssetStorage
+
+_repository = MemoryRepository()
+_tutor = build_tutor_graph(
+    _repository, AssetStorage(_repository), checkpointer=MemorySaver()
+)
 
 
 def run_supervisor(user_input: str, recursion_limit: int = 50):
-    config = {"recursion_limit": recursion_limit}
-    last_chunk = None
-    for chunk in supervisor.stream(
-        {"messages": [{"role": "user", "content": user_input}]},
-        config=config,
-    ):
-        last_chunk = chunk
-    return get_final_messages(last_chunk)
+    """Backward-compatible CLI function backed by the education Tutor Graph."""
+    session_id = str(uuid.uuid4())
+    result = _tutor.invoke(
+        {
+            "user_id": "cli-user",
+            "session_id": session_id,
+            "message": user_input,
+            "attachment_ids": [],
+        },
+        {
+            "recursion_limit": recursion_limit,
+            "configurable": {"thread_id": f"cli-user:{session_id}"},
+        },
+    )
+    response = result.get("tutor_response", {})
+    return [response.get("message", "")]
