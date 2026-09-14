@@ -1,5 +1,5 @@
 from education.mastery import evidence_for_outcome, update_mastery
-from education.models import ExamTrend, MasteryRecord, Subject
+from education.models import MasteryRecord, Subject
 from education.learning_profile import summarize_learning_profile
 from education.recommendations import rank_recommendations
 
@@ -33,37 +33,15 @@ def test_recommendation_uses_required_weighting_and_sorts_descending():
             recent_errors=3,
         )
     ]
-    trends = [
-        ExamTrend(
-            skill_id="math.derivative",
-            subject=Subject.MATH,
-            latest_weight=1,
-            previous_weight=0.5,
-        ),
-        ExamTrend(
-            skill_id="math.integral",
-            subject=Subject.MATH,
-            latest_weight=0,
-            previous_weight=0,
-        ),
-    ]
-    result = rank_recommendations(mastery, trends)
+    result = rank_recommendations(mastery)
     assert len(result) == 1
     assert result[0].skill_id == "math.derivative"
-    assert result[0].exam_prevalence == 0.8
-    assert result[0].score == 0.79
+    assert result[0].score == 0.785
+    assert "tỷ lệ lỗi" in result[0].reason
 
 
 def test_empty_profile_never_creates_template_recommendations():
-    trends = [
-        ExamTrend(
-            skill_id="math.derivatives",
-            subject=Subject.MATH,
-            latest_weight=1,
-            previous_weight=1,
-        )
-    ]
-    assert rank_recommendations([], trends) == []
+    assert rank_recommendations([]) == []
     summary = summarize_learning_profile([])
     assert summary.status == "insufficient_data"
     assert summary.overall_mastery is None

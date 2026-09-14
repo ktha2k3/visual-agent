@@ -51,21 +51,37 @@ button { cursor: pointer; }
 .stage-list li > span { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: #e6ebe7; }
 .stage-list .current { color: #174c34; font-weight: 700; }
 .stage-list .current > span, .stage-list .complete > span { background: #cde8d7; color: #176941; }
-.transcription-card, .source-list { margin-top: 24px; padding-top: 20px; border-top: 1px solid #dde3de; }
+.transcription-card, .source-list, .learning-plan-card { margin-top: 24px; padding-top: 20px; border-top: 1px solid #dde3de; }
 .transcription-card textarea { width: 100%; min-height: 130px; margin-top: 10px; resize: vertical; padding: 10px; border: 1px solid #ccd5cf; border-radius: 10px; background: #fff; }
 .transcription-card p { margin: 7px 0; color: #7a8580; font-size: 11px; line-height: 1.5; }
 .source-list { display: grid; gap: 8px; }
 .source-list a { color: #176941; font-size: 13px; text-decoration: none; }
+.learning-plan-card > div { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; }
+.learning-plan-card > div strong { color: #17553d; font-size: 14px; }
+.learning-plan-card > div small { color: #75817b; font-size: 10px; }
+.learning-plan-card h3 { margin: 9px 0 6px; font-size: 14px; }
+.learning-plan-card > p { margin: 0 0 12px; color: #69766f; font-size: 11px; line-height: 1.5; }
+.learning-plan-card ol { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.learning-plan-card li { display: grid; gap: 3px; padding: 9px; border-radius: 9px; background: #fff; }
+.learning-plan-card li b { color: #286344; font-size: 11px; }
+.learning-plan-card li span { color: #69766f; font-size: 10px; line-height: 1.4; }
 
 .chat-panel { min-width: 0; height: calc(100vh - 70px); display: flex; flex-direction: column; background: #fff; }
 .chat-panel > header { display: flex; align-items: center; gap: 12px; padding: 18px 28px; border-bottom: 1px solid #eef1ed; }
 .subject-icon { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 14px; background: #e3f2e8; font-size: 22px; }
 .chat-panel h1 { margin: 0; font-size: 20px; }
 .chat-panel header p { margin: 4px 0 0; color: #7a8580; font-size: 13px; }
+.mode-switch { display: flex; gap: 5px; margin-left: auto; padding: 4px; border-radius: 11px; background: #edf1ed; }
+.mode-switch button { border: 0; border-radius: 8px; padding: 8px 10px; color: #64706a; background: transparent; font-size: 11px; font-weight: 700; }
+.mode-switch button.active { color: #fff; background: #176941; }
+.mode-switch button:disabled { cursor: default; opacity: .6; }
 .messages { flex: 1; overflow-y: auto; padding: 28px max(28px, calc((100% - 760px)/2)); }
 .welcome { max-width: 430px; margin: 12vh auto 0; text-align: center; color: #66736d; }
-.welcome > span { font-size: 38px; color: #37a36b; }
 .welcome h2 { color: #22332b; }
+.learning-mode-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 22px; }
+.learning-mode-actions button { padding: 12px; border: 1px solid #cddfd3; border-radius: 12px; color: #17553d; background: #f4faf6; font-weight: 700; }
+.learning-mode-actions button:hover { border-color: #3a8c64; background: #e8f5ec; }
+.learning-mode-actions button.active { border-color: #176941; color: #fff; background: #176941; }
 .message { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 24px; }
 .message > span { flex: 0 0 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; background: #153f2d; color: #fff; font-size: 12px; font-weight: 800; }
 .message.user { flex-direction: row-reverse; }
@@ -171,34 +187,6 @@ button { cursor: pointer; }
 .history-empty { display: grid; gap: 6px; margin-top: 20px; padding: 44px 20px; border: 1px dashed #cbd7cf; border-radius: 12px; color: #748079; text-align: center; }
 .history-empty strong { color: #42564c; }
 .source-list > span:not(.eyebrow) { display: block; color: #345246; font-size: 14px; padding: 5px 0; }
-.exam-plan-panel { width: min(960px, 100%); }
-.exam-plan-guide { display: grid; grid-template-columns: minmax(0, 1fr) 210px; gap: 14px 24px; margin-top: 18px; padding: 16px; border: 1px solid #d9e3dc; border-radius: 13px; background: #fff; }
-.exam-plan-guide h3 { margin: 0 0 8px; }
-.exam-plan-guide ol { margin: 0; padding-left: 20px; color: #53635c; font-size: 13px; line-height: 1.55; }
-.exam-plan-guide label { display: grid; align-content: start; gap: 7px; color: #33453d; font-size: 13px; font-weight: 700; }
-.exam-plan-guide select { width: 100%; padding: 10px; border: 1px solid #cbd7cf; border-radius: 9px; background: #f8faf8; color: #1d2d26; }
-.exam-plan-guide > small { grid-column: 1 / -1; color: #738078; }
-.research-summary { margin: 18px 0; padding: 15px; border: 1px solid #cfe0d5; border-radius: 13px; background: #edf7f0; }
-.research-summary.partial { border-color: #ead7a7; background: #fff8e7; }
-.research-summary.insufficient_data { border-color: #dfc5c5; background: #fff1f1; }
-.research-summary > div { display: flex; justify-content: space-between; gap: 14px; }
-.research-summary p { margin: 8px 0 0; color: #6b5b4c; font-size: 13px; }
-.exam-distribution { display: grid; gap: 9px; margin: 22px 0; }
-.exam-distribution h3, .exam-sources h3 { margin: 0 0 5px; }
-.exam-distribution > div { display: grid; grid-template-columns: minmax(150px, 1fr) 180px 45px 85px; align-items: center; gap: 9px; font-size: 13px; }
-.exam-distribution i { height: 7px; overflow: hidden; border-radius: 6px; background: #e0e7e2; }
-.exam-distribution i b { display: block; height: 100%; border-radius: inherit; background: #2b9660; }
-.exam-distribution small { color: #78827c; }
-.exam-sources { display: grid; gap: 7px; margin: 20px 0; }
-.exam-sources a { color: #176941; font-size: 13px; }
-.score-band-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; margin-top: 20px; }
-.score-band-list article { padding: 16px; border: 1px solid #dce4de; border-radius: 13px; background: #fff; }
-.score-band-list article > header { display: flex; justify-content: space-between; gap: 10px; color: #174c34; }
-.score-band-list article > small { display: block; margin-top: 7px; color: #748079; }
-.score-band-list ol { display: grid; gap: 9px; padding-left: 20px; }
-.score-band-list ol li b, .score-band-list ol li span { display: block; }
-.score-band-list ol li span { color: #69766f; font-size: 12px; line-height: 1.45; }
-.score-band-list details { font-size: 13px; }
 .admin-actions { margin: 22px 0; }
 .review-list { display: grid; gap: 12px; }
 .review-list article { padding: 18px; border: 1px solid #dce4de; border-radius: 13px; background: #fff; }
@@ -218,11 +206,9 @@ button { cursor: pointer; }
   .account-actions { margin-left: auto; }
   .workspace { display: block; }.progress-panel { display: none; }
   .chat-panel { height: calc(100vh - 118px); }
+  .chat-panel > header { align-items: flex-start; flex-wrap: wrap; padding: 14px; }
+  .mode-switch { width: 100%; margin-left: 0; }
+  .mode-switch button { flex: 1; }
   .messages { padding: 20px 14px; }.composer { padding: 10px 12px; }
-  .score-band-list { grid-template-columns: 1fr; }
   .knowledge-status-summary { grid-template-columns: repeat(2, 1fr); }
-  .exam-plan-guide { grid-template-columns: 1fr; }
-  .exam-plan-guide > small { grid-column: auto; }
-  .exam-distribution > div { grid-template-columns: 1fr 90px 40px; }
-  .exam-distribution small { grid-column: 1 / -1; }
 }

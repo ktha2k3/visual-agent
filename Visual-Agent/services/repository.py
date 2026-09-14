@@ -9,30 +9,25 @@ import threading
 import unicodedata
 import uuid
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
 
-from education.curriculum import SKILLS
 from education.models import (
     AssetRecord,
     AuthUser,
     ChatMessage,
+    ChatSessionRecord,
     ChatSessionSummary,
     Citation,
-    ExamQuestion,
-    ExamSource,
-    ExamTrend,
     KnowledgeIngestionJob,
     KnowledgeDocumentSummary,
+    LearningMode,
     MasteryRecord,
-    ReviewPatch,
-    ReviewStatus,
     Subject,
 )
-from exam.sources import latest_completed_exam_year
 from utils.config import Settings, get_settings
 
 
@@ -45,13 +40,27 @@ class TutorRepository(Protocol):
     async def get_mastery(self, user_id: str) -> list[MasteryRecord]: ...
     async def upsert_mastery(self, record: MasteryRecord) -> MasteryRecord: ...
     async def save_chat_message(self, message: ChatMessage) -> ChatMessage: ...
+    async def create_chat_session(
+        self,
+        user_id: str,
+        subject: Subject,
+        learning_mode: LearningMode = LearningMode.GUIDED_PROBLEM,
+    ) -> ChatSessionRecord: ...
+    async def get_chat_session(
+        self, user_id: str, session_id: str
+    ) -> ChatSessionRecord | None: ...
+    async def update_chat_session_mode(
+        self, user_id: str, session_id: str, learning_mode: LearningMode
+    ) -> ChatSessionRecord | None: ...
     async def get_chat_history(
         self, user_id: str, session_id: str, limit: int = 100
     ) -> list[ChatMessage]: ...
     async def list_chat_sessions(
-        self, user_id: str, limit: int = 50
+        self,
+        user_id: str,
+        limit: int = 50,
+        subject: Subject | None = None,
     ) -> list[ChatSessionSummary]: ...
-    async def get_exam_trends(self, subjects: list[Subject] | None = None) -> list[ExamTrend]: ...
     async def retrieve_context(
         self,
         subject: Subject,
@@ -93,17 +102,6 @@ class TutorRepository(Protocol):
         self, user_id: str, session_id: str, problem_id: str, answer: str,
         answer_correct: bool, evidence: float | None, misconception: str | None,
     ) -> None: ...
-    async def save_exam_source(self, source: ExamSource) -> ExamSource: ...
-    async def save_exam_artifact(self, artifact: dict[str, Any]) -> str: ...
-    async def save_exam_questions(self, questions: list[ExamQuestion]) -> None: ...
-    async def list_review_queue(self, limit: int = 100) -> list[ExamQuestion]: ...
-    async def patch_review(self, question_id: str, patch: ReviewPatch) -> ExamQuestion | None: ...
-    async def list_approved_exam_questions(
-        self,
-        subjects: list[Subject] | None = None,
-        years: list[int] | None = None,
-    ) -> list[ExamQuestion]: ...
-    async def list_exam_sources(self, source_ids: list[str]) -> list[ExamSource]: ...
     async def delete_user_data(self, user_id: str) -> None: ...
 
 
@@ -113,9 +111,6 @@ class MemoryRepository:
     def __init__(self):
         self.assets: dict[str, AssetRecord] = {}
         self.mastery: dict[tuple[str, str], MasteryRecord] = {}
-        self.exam_sources: dict[str, ExamSource] = {}
-        self.exam_artifacts: dict[str, dict[str, Any]] = {}
-        self.exam_questions: dict[str, ExamQuestion] = {}
         self.content_documents: dict[str, dict[str, Any]] = {}
         self.content_chunks: list[dict[str, Any]] = []
         self.knowledge_jobs: dict[str, KnowledgeIngestionJob] = {}
@@ -123,6 +118,7 @@ class MemoryRepository:
         self.hint_events: list[dict[str, Any]] = []
         self.attempts: list[dict[str, Any]] = []
         self.chat_messages: dict[tuple[str, str, str, str], ChatMessage] = {}
+        self.chat_sessions: dict[tuple[str, str], ChatSessionRecord] = {}
         self._lock = asyncio.Lock()
 
     async def save_asset(self, record: AssetRecord) -> None:
@@ -151,6 +147,28 @@ class MemoryRepository:
         return record
 
     async def save_chat_message(self, message: ChatMessage) -> ChatMessage:
+        subject_value = message.metadata.get("subject")
+        try:
+            subject = Subject(subject_value)
+        except (TypeError, ValueError):
+            subject = Subject.UNKNOWN
+        session_key = (message.user_id, message.session_id)
+        existing_session = self.chat_sessions.get(session_key)
+        try:
+            learning_mode = LearningMode(message.metadata.get("learning_mode"))
+        except (TypeError, ValueError):
+            learning_mode = LearningMode.GUIDED_PROBLEM
+        if existing_session is None and subject != Subject.UNKNOWN:
+            self.chat_sessions[session_key] = ChatSessionRecord(
+                id=message.session_id,
+                user_id=message.user_id,
+                subject=subject,
+                learning_mode=learning_mode,
+            )
+        elif existing_session is not None:
+            self.chat_sessions[session_key] = existing_session.model_copy(
+                update={"updated_at": datetime.now().astimezone()}
+            )
         key = (
             message.user_id,
             message.session_id,
@@ -164,6 +182,39 @@ class MemoryRepository:
         self.chat_messages[key] = stored
         return stored
 
+    async def create_chat_session(
+        self,
+        user_id: str,
+        subject: Subject,
+        learning_mode: LearningMode = LearningMode.GUIDED_PROBLEM,
+    ) -> ChatSessionRecord:
+        session = ChatSessionRecord(
+            user_id=user_id, subject=subject, learning_mode=learning_mode
+        )
+        self.chat_sessions[(user_id, session.id)] = session
+        return session
+
+    async def get_chat_session(
+        self, user_id: str, session_id: str
+    ) -> ChatSessionRecord | None:
+        return self.chat_sessions.get((user_id, session_id))
+
+    async def update_chat_session_mode(
+        self, user_id: str, session_id: str, learning_mode: LearningMode
+    ) -> ChatSessionRecord | None:
+        key = (user_id, session_id)
+        session = self.chat_sessions.get(key)
+        if session is None:
+            return None
+        updated = session.model_copy(
+            update={
+                "learning_mode": learning_mode,
+                "updated_at": datetime.now().astimezone(),
+            }
+        )
+        self.chat_sessions[key] = updated
+        return updated
+
     async def get_chat_history(
         self, user_id: str, session_id: str, limit: int = 100
     ) -> list[ChatMessage]:
@@ -175,55 +226,19 @@ class MemoryRepository:
         return sorted(messages, key=lambda item: item.created_at)[-limit:]
 
     async def list_chat_sessions(
-        self, user_id: str, limit: int = 50
+        self,
+        user_id: str,
+        limit: int = 50,
+        subject: Subject | None = None,
     ) -> list[ChatSessionSummary]:
         messages = sorted(
             [item for item in self.chat_messages.values() if item.user_id == user_id],
             key=lambda item: item.created_at,
         )
-        return _summarize_chat_sessions(messages, limit)
-
-    async def get_exam_trends(
-        self, subjects: list[Subject] | None = None
-    ) -> list[ExamTrend]:
-        allowed = set(subjects or [item.subject for item in SKILLS])
-        by_skill: dict[str, dict[int, float]] = defaultdict(lambda: defaultdict(float))
-        reviewed = [
-            item
-            for item in self.exam_questions.values()
-            if item.review_status == ReviewStatus.APPROVED
-            and item.subject in allowed
-            and item.exam_year <= latest_completed_exam_year(date.today())
+        sessions = [
+            item for (uid, _), item in self.chat_sessions.items() if uid == user_id
         ]
-        years = sorted({item.exam_year for item in reviewed}, reverse=True)[:2]
-        if not reviewed:
-            return []
-        level_weight = {"recognition": 1.0, "understanding": 2.0, "application": 3.0}
-        for item in reviewed:
-            if item.exam_year not in years:
-                continue
-            weight = level_weight[item.cognitive_level.value]
-            for skill_id in item.skill_ids:
-                by_skill[skill_id][item.exam_year] += weight
-        maxima = {
-            year: max((values.get(year, 0.0) for values in by_skill.values()), default=1.0)
-            for year in years
-        }
-        latest = years[0]
-        previous = years[1] if len(years) > 1 else latest
-        trends = []
-        for skill_id, values in by_skill.items():
-            skill = next((s for s in SKILLS if s.id == skill_id), None)
-            if skill:
-                trends.append(
-                    ExamTrend(
-                        skill_id=skill_id,
-                        subject=skill.subject,
-                        latest_weight=values.get(latest, 0.0) / maxima[latest],
-                        previous_weight=values.get(previous, 0.0) / maxima[previous],
-                    )
-                )
-        return trends
+        return _summarize_chat_sessions(messages, limit, subject, sessions)
 
     async def retrieve_context(
         self,
@@ -374,91 +389,14 @@ class MemoryRepository:
             }
         )
 
-    async def save_exam_source(self, source: ExamSource) -> ExamSource:
-        existing = next(
-            (item for item in self.exam_sources.values() if item.url == source.url and item.subject == source.subject),
-            None,
-        )
-        if existing:
-            source.id = existing.id
-        source.id = source.id or str(len(self.exam_sources) + 1)
-        self.exam_sources[source.id] = source
-        return source
-
-    async def save_exam_artifact(self, artifact: dict[str, Any]) -> str:
-        existing = next(
-            (
-                item for item in self.exam_artifacts.values()
-                if item["source_id"] == artifact["source_id"]
-                and item["checksum"] == artifact["checksum"]
-            ),
-            None,
-        )
-        artifact_id = existing["id"] if existing else str(len(self.exam_artifacts) + 1)
-        self.exam_artifacts[artifact_id] = {**artifact, "id": artifact_id}
-        return artifact_id
-
-    async def save_exam_questions(self, questions: list[ExamQuestion]) -> None:
-        for item in questions:
-            existing = next(
-                (
-                    question
-                    for question in self.exam_questions.values()
-                    if question.source_id == item.source_id
-                    and question.question_number == item.question_number
-                ),
-                None,
-            )
-            if existing:
-                continue
-            item.id = item.id or str(len(self.exam_questions) + 1)
-            self.exam_questions[item.id] = item
-
-    async def list_review_queue(self, limit: int = 100) -> list[ExamQuestion]:
-        return [
-            item
-            for item in self.exam_questions.values()
-            if item.review_status == ReviewStatus.PENDING
-        ][:limit]
-
-    async def patch_review(
-        self, question_id: str, patch: ReviewPatch
-    ) -> ExamQuestion | None:
-        item = self.exam_questions.get(question_id)
-        if not item:
-            return None
-        updated = item.model_copy(update=patch.model_dump(exclude_none=True))
-        self.exam_questions[question_id] = updated
-        return updated
-
-    async def list_approved_exam_questions(
-        self,
-        subjects: list[Subject] | None = None,
-        years: list[int] | None = None,
-    ) -> list[ExamQuestion]:
-        allowed_subjects = set(subjects or [item.subject for item in SKILLS])
-        allowed_years = set(years or [])
-        return sorted(
-            [
-                item
-                for item in self.exam_questions.values()
-                if item.review_status == ReviewStatus.APPROVED
-                and item.subject in allowed_subjects
-                and (not allowed_years or item.exam_year in allowed_years)
-            ],
-            key=lambda item: (item.exam_year, item.question_number),
-            reverse=True,
-        )
-
-    async def list_exam_sources(self, source_ids: list[str]) -> list[ExamSource]:
-        requested = set(source_ids)
-        return [item for key, item in self.exam_sources.items() if key in requested]
-
     async def delete_user_data(self, user_id: str) -> None:
         self.assets = {key: value for key, value in self.assets.items() if value.user_id != user_id}
         self.mastery = {key: value for key, value in self.mastery.items() if key[0] != user_id}
         self.chat_messages = {
             key: value for key, value in self.chat_messages.items() if key[0] != user_id
+        }
+        self.chat_sessions = {
+            key: value for key, value in self.chat_sessions.items() if key[0] != user_id
         }
         owned_documents = {
             key for key, value in self.content_documents.items() if value.get("user_id") == user_id
@@ -502,6 +440,34 @@ class LocalRepository(MemoryRepository):
     def _initialize_chat_database(self) -> None:
         with self._sqlite_lock, self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tutoring_sessions (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    subject TEXT NOT NULL CHECK (
+                        subject IN ('math', 'physics', 'chemistry', 'biology')
+                    ),
+                    learning_mode TEXT NOT NULL DEFAULT 'guided_problem' CHECK (
+                        learning_mode IN ('concept', 'guided_problem')
+                    ),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            session_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(tutoring_sessions)"
+                ).fetchall()
+            }
+            if "learning_mode" not in session_columns:
+                connection.execute(
+                    "ALTER TABLE tutoring_sessions ADD COLUMN learning_mode "
+                    "TEXT NOT NULL DEFAULT 'guided_problem' CHECK "
+                    "(learning_mode IN ('concept', 'guided_problem'))"
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS chat_messages (
@@ -585,6 +551,12 @@ class LocalRepository(MemoryRepository):
             )
             connection.execute(
                 """
+                CREATE INDEX IF NOT EXISTS tutoring_sessions_user_subject_updated_idx
+                ON tutoring_sessions(user_id, subject, updated_at DESC)
+                """
+            )
+            connection.execute(
+                """
                 CREATE INDEX IF NOT EXISTS chat_messages_user_session_created_idx
                 ON chat_messages(user_id, session_id, created_at)
                 """
@@ -595,10 +567,156 @@ class LocalRepository(MemoryRepository):
                 ON knowledge_ingestion_jobs(user_id, created_at DESC)
                 """
             )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO tutoring_sessions (
+                    id, user_id, subject, learning_mode, created_at, updated_at
+                )
+                SELECT
+                    session_id,
+                    user_id,
+                    CASE json_extract(metadata_json, '$.subject')
+                        WHEN 'physics' THEN 'physics'
+                        WHEN 'chemistry' THEN 'chemistry'
+                        WHEN 'biology' THEN 'biology'
+                        ELSE 'math'
+                    END,
+                    'guided_problem',
+                    MIN(created_at),
+                    MAX(created_at)
+                FROM chat_messages
+                GROUP BY session_id, user_id
+                """
+            )
+
+    def _create_chat_session_sync(
+        self, user_id: str, subject: Subject, learning_mode: LearningMode
+    ) -> ChatSessionRecord:
+        session = ChatSessionRecord(
+            user_id=user_id, subject=subject, learning_mode=learning_mode
+        )
+        with self._sqlite_lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO tutoring_sessions (
+                    id, user_id, subject, learning_mode, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session.id,
+                    session.user_id,
+                    session.subject.value,
+                    session.learning_mode.value,
+                    session.created_at.isoformat(),
+                    session.updated_at.isoformat(),
+                ),
+            )
+        return session
+
+    async def create_chat_session(
+        self,
+        user_id: str,
+        subject: Subject,
+        learning_mode: LearningMode = LearningMode.GUIDED_PROBLEM,
+    ) -> ChatSessionRecord:
+        return await asyncio.to_thread(
+            self._create_chat_session_sync, user_id, subject, learning_mode
+        )
+
+    def _get_chat_session_sync(
+        self, user_id: str, session_id: str
+    ) -> ChatSessionRecord | None:
+        with self._sqlite_lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM tutoring_sessions WHERE id = ? AND user_id = ?",
+                (session_id, user_id),
+            ).fetchone()
+        return ChatSessionRecord.model_validate(dict(row)) if row else None
+
+    async def get_chat_session(
+        self, user_id: str, session_id: str
+    ) -> ChatSessionRecord | None:
+        return await asyncio.to_thread(
+            self._get_chat_session_sync, user_id, session_id
+        )
+
+    def _update_chat_session_mode_sync(
+        self, user_id: str, session_id: str, learning_mode: LearningMode
+    ) -> ChatSessionRecord | None:
+        now = datetime.now().astimezone().isoformat()
+        with self._sqlite_lock, self._connect() as connection:
+            connection.execute(
+                "UPDATE tutoring_sessions SET learning_mode = ?, updated_at = ? "
+                "WHERE id = ? AND user_id = ?",
+                (learning_mode.value, now, session_id, user_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM tutoring_sessions WHERE id = ? AND user_id = ?",
+                (session_id, user_id),
+            ).fetchone()
+        return ChatSessionRecord.model_validate(dict(row)) if row else None
+
+    async def update_chat_session_mode(
+        self, user_id: str, session_id: str, learning_mode: LearningMode
+    ) -> ChatSessionRecord | None:
+        return await asyncio.to_thread(
+            self._update_chat_session_mode_sync,
+            user_id,
+            session_id,
+            learning_mode,
+        )
 
     def _save_chat_message_sync(self, message: ChatMessage) -> ChatMessage:
         message_id = message.id or str(uuid.uuid4())
+        subject_value = message.metadata.get("subject")
+        normalized_subject = (
+            subject_value
+            if subject_value in {"math", "physics", "chemistry", "biology"}
+            else None
+        )
+        try:
+            normalized_mode = LearningMode(
+                message.metadata.get("learning_mode")
+            ).value
+        except (TypeError, ValueError):
+            normalized_mode = LearningMode.GUIDED_PROBLEM.value
+        now = datetime.now().astimezone().isoformat()
         with self._sqlite_lock, self._connect() as connection:
+            existing_session = connection.execute(
+                "SELECT user_id, subject FROM tutoring_sessions WHERE id = ?",
+                (message.session_id,),
+            ).fetchone()
+            if existing_session and existing_session["user_id"] != message.user_id:
+                raise PermissionError("Chat session belongs to another user")
+            if (
+                existing_session
+                and normalized_subject
+                and existing_session["subject"] != normalized_subject
+            ):
+                raise ValueError("Chat session belongs to another subject")
+            if not existing_session:
+                if not normalized_subject:
+                    normalized_subject = Subject.MATH.value
+                connection.execute(
+                    """
+                    INSERT INTO tutoring_sessions (
+                        id, user_id, subject, learning_mode, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        message.session_id,
+                        message.user_id,
+                        normalized_subject,
+                        normalized_mode,
+                        message.created_at.isoformat(),
+                        now,
+                    ),
+                )
+            else:
+                connection.execute(
+                    "UPDATE tutoring_sessions SET updated_at = ? WHERE id = ?",
+                    (now, message.session_id),
+                )
             connection.execute(
                 """
                 INSERT INTO chat_messages (
@@ -680,9 +798,18 @@ class LocalRepository(MemoryRepository):
         )
 
     def _list_chat_sessions_sync(
-        self, user_id: str, limit: int
+        self, user_id: str, limit: int, subject: Subject | None
     ) -> list[ChatSessionSummary]:
         with self._sqlite_lock, self._connect() as connection:
+            session_rows = connection.execute(
+                """
+                SELECT * FROM tutoring_sessions
+                WHERE user_id = ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            ).fetchall()
             rows = connection.execute(
                 """
                 SELECT * FROM chat_messages
@@ -704,12 +831,28 @@ class LocalRepository(MemoryRepository):
             )
             for row in rows
         ]
-        return _summarize_chat_sessions(messages, limit)
+        sessions = [
+            ChatSessionRecord(
+                id=row["id"],
+                user_id=row["user_id"],
+                subject=row["subject"],
+                learning_mode=row["learning_mode"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            for row in session_rows
+        ]
+        return _summarize_chat_sessions(messages, limit, subject, sessions)
 
     async def list_chat_sessions(
-        self, user_id: str, limit: int = 50
+        self,
+        user_id: str,
+        limit: int = 50,
+        subject: Subject | None = None,
     ) -> list[ChatSessionSummary]:
-        return await asyncio.to_thread(self._list_chat_sessions_sync, user_id, limit)
+        return await asyncio.to_thread(
+            self._list_chat_sessions_sync, user_id, limit, subject
+        )
 
     def _save_approved_content_sync(
         self, document: dict[str, Any], chunks: list[dict[str, Any]]
@@ -1035,6 +1178,9 @@ class LocalRepository(MemoryRepository):
                     "DELETE FROM chat_messages WHERE user_id = ?", (user_id,)
                 )
                 connection.execute(
+                    "DELETE FROM tutoring_sessions WHERE user_id = ?", (user_id,)
+                )
+                connection.execute(
                     "DELETE FROM knowledge_chunks WHERE user_id = ?", (user_id,)
                 )
                 connection.execute(
@@ -1045,6 +1191,339 @@ class LocalRepository(MemoryRepository):
                 )
 
         await asyncio.to_thread(delete_messages)
+
+
+class PostgresChatRepository(LocalRepository):
+    """Use PostgreSQL for durable chat data while retaining local non-chat fallbacks."""
+
+    def __init__(self, database_url: str, local_database_path: str):
+        super().__init__(local_database_path)
+        self.database_url = database_url
+        self._pg_pool: Any | None = None
+        self._pg_pool_lock = asyncio.Lock()
+
+    async def _get_pg_pool(self):
+        if self._pg_pool is not None:
+            return self._pg_pool
+        async with self._pg_pool_lock:
+            if self._pg_pool is not None:
+                return self._pg_pool
+            from psycopg.rows import dict_row
+            from psycopg_pool import AsyncConnectionPool
+
+            pool = AsyncConnectionPool(
+                conninfo=self.database_url,
+                min_size=1,
+                max_size=8,
+                open=False,
+                kwargs={"autocommit": True, "row_factory": dict_row},
+            )
+            await pool.open(wait=True)
+            async with pool.connection() as connection:
+                await connection.execute("CREATE SCHEMA IF NOT EXISTS visual_agent")
+                await connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS visual_agent.tutoring_sessions (
+                        id uuid PRIMARY KEY,
+                        user_id text NOT NULL,
+                        subject text NOT NULL CHECK (
+                            subject IN ('math', 'physics', 'chemistry', 'biology')
+                        ),
+                        learning_mode text NOT NULL DEFAULT 'guided_problem' CHECK (
+                            learning_mode IN ('concept', 'guided_problem')
+                        ),
+                        created_at timestamptz NOT NULL DEFAULT now(),
+                        updated_at timestamptz NOT NULL DEFAULT now()
+                    )
+                    """
+                )
+                await connection.execute(
+                    """
+                    ALTER TABLE visual_agent.tutoring_sessions
+                    ADD COLUMN IF NOT EXISTS learning_mode text NOT NULL
+                    DEFAULT 'guided_problem'
+                    """
+                )
+                await connection.execute(
+                    """
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint
+                            WHERE conname = 'tutoring_sessions_learning_mode_check'
+                              AND conrelid = 'visual_agent.tutoring_sessions'::regclass
+                        ) THEN
+                            ALTER TABLE visual_agent.tutoring_sessions
+                            ADD CONSTRAINT tutoring_sessions_learning_mode_check
+                            CHECK (learning_mode IN ('concept', 'guided_problem'));
+                        END IF;
+                    END
+                    $$
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS visual_agent.chat_messages (
+                        id uuid PRIMARY KEY,
+                        user_id text NOT NULL,
+                        session_id uuid NOT NULL REFERENCES
+                            visual_agent.tutoring_sessions(id) ON DELETE CASCADE,
+                        request_id text NOT NULL,
+                        role text NOT NULL CHECK (role IN ('user', 'assistant')),
+                        content text NOT NULL CHECK (
+                            char_length(content) BETWEEN 1 AND 50000
+                        ),
+                        metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+                        created_at timestamptz NOT NULL DEFAULT now(),
+                        UNIQUE (user_id, session_id, request_id, role)
+                    )
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS tutoring_sessions_user_subject_updated_idx
+                    ON visual_agent.tutoring_sessions(user_id, subject, updated_at DESC)
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS chat_messages_user_session_created_idx
+                    ON visual_agent.chat_messages(user_id, session_id, created_at)
+                    """
+                )
+            self._pg_pool = pool
+            return pool
+
+    async def healthcheck(self) -> bool:
+        pool = await self._get_pg_pool()
+        async with pool.connection() as connection:
+            await connection.execute("SELECT 1")
+        return True
+
+    async def create_chat_session(
+        self,
+        user_id: str,
+        subject: Subject,
+        learning_mode: LearningMode = LearningMode.GUIDED_PROBLEM,
+    ) -> ChatSessionRecord:
+        session = ChatSessionRecord(
+            user_id=user_id, subject=subject, learning_mode=learning_mode
+        )
+        pool = await self._get_pg_pool()
+        async with pool.connection() as connection:
+            row = await (
+                await connection.execute(
+                    """
+                    INSERT INTO visual_agent.tutoring_sessions (
+                        id, user_id, subject, learning_mode, created_at, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING *
+                    """,
+                    (
+                        session.id,
+                        session.user_id,
+                        session.subject.value,
+                        session.learning_mode.value,
+                        session.created_at,
+                        session.updated_at,
+                    ),
+                )
+            ).fetchone()
+        return ChatSessionRecord.model_validate(row)
+
+    async def get_chat_session(
+        self, user_id: str, session_id: str
+    ) -> ChatSessionRecord | None:
+        pool = await self._get_pg_pool()
+        async with pool.connection() as connection:
+            row = await (
+                await connection.execute(
+                    """
+                    SELECT * FROM visual_agent.tutoring_sessions
+                    WHERE id = %s AND user_id = %s
+                    """,
+                    (session_id, user_id),
+                )
+            ).fetchone()
+        return ChatSessionRecord.model_validate(row) if row else None
+
+    async def update_chat_session_mode(
+        self, user_id: str, session_id: str, learning_mode: LearningMode
+    ) -> ChatSessionRecord | None:
+        pool = await self._get_pg_pool()
+        async with pool.connection() as connection:
+            row = await (
+                await connection.execute(
+                    """
+                    UPDATE visual_agent.tutoring_sessions
+                    SET learning_mode = %s, updated_at = now()
+                    WHERE id = %s AND user_id = %s
+                    RETURNING *
+                    """,
+                    (learning_mode.value, session_id, user_id),
+                )
+            ).fetchone()
+        return ChatSessionRecord.model_validate(row) if row else None
+
+    async def _ensure_pg_session(
+        self, connection, message: ChatMessage
+    ) -> None:
+        row = await (
+            await connection.execute(
+                """
+                SELECT user_id, subject
+                FROM visual_agent.tutoring_sessions
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (message.session_id,),
+            )
+        ).fetchone()
+        subject_value = message.metadata.get("subject")
+        normalized_subject = (
+            subject_value
+            if subject_value in {"math", "physics", "chemistry", "biology"}
+            else None
+        )
+        try:
+            learning_mode = LearningMode(
+                message.metadata.get("learning_mode")
+            ).value
+        except (TypeError, ValueError):
+            learning_mode = LearningMode.GUIDED_PROBLEM.value
+        if row:
+            if row["user_id"] != message.user_id:
+                raise PermissionError("Chat session belongs to another user")
+            if normalized_subject and row["subject"] != normalized_subject:
+                raise ValueError("Chat session belongs to another subject")
+            await connection.execute(
+                """
+                UPDATE visual_agent.tutoring_sessions
+                SET updated_at = now()
+                WHERE id = %s
+                """,
+                (message.session_id,),
+            )
+            return
+        await connection.execute(
+            """
+            INSERT INTO visual_agent.tutoring_sessions (
+                id, user_id, subject, learning_mode, created_at, updated_at
+            ) VALUES (%s, %s, %s, %s, %s, now())
+            """,
+            (
+                message.session_id,
+                message.user_id,
+                normalized_subject or Subject.MATH.value,
+                learning_mode,
+                message.created_at,
+            ),
+        )
+
+    async def save_chat_message(self, message: ChatMessage) -> ChatMessage:
+        from psycopg.types.json import Jsonb
+
+        pool = await self._get_pg_pool()
+        message_id = message.id or str(uuid.uuid4())
+        async with pool.connection() as connection:
+            async with connection.transaction():
+                await self._ensure_pg_session(connection, message)
+                row = await (
+                    await connection.execute(
+                        """
+                        INSERT INTO visual_agent.chat_messages (
+                            id, user_id, session_id, request_id, role, content,
+                            metadata, created_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (user_id, session_id, request_id, role)
+                        DO UPDATE SET
+                            content = EXCLUDED.content,
+                            metadata = EXCLUDED.metadata
+                        RETURNING *
+                        """,
+                        (
+                            message_id,
+                            message.user_id,
+                            message.session_id,
+                            message.request_id,
+                            message.role,
+                            message.content,
+                            Jsonb(message.metadata),
+                            message.created_at,
+                        ),
+                    )
+                ).fetchone()
+        return ChatMessage.model_validate(row)
+
+    async def get_chat_history(
+        self, user_id: str, session_id: str, limit: int = 100
+    ) -> list[ChatMessage]:
+        pool = await self._get_pg_pool()
+        async with pool.connection() as connection:
+            rows = await (
+                await connection.execute(
+                    """
+                    SELECT * FROM visual_agent.chat_messages
+                    WHERE user_id = %s AND session_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                    """,
+                    (user_id, session_id, limit),
+                )
+            ).fetchall()
+        return [ChatMessage.model_validate(row) for row in reversed(rows)]
+
+    async def list_chat_sessions(
+        self,
+        user_id: str,
+        limit: int = 50,
+        subject: Subject | None = None,
+    ) -> list[ChatSessionSummary]:
+        pool = await self._get_pg_pool()
+        params: list[Any] = [user_id]
+        subject_clause = ""
+        if subject is not None:
+            subject_clause = "AND subject = %s"
+            params.append(subject.value)
+        params.append(limit)
+        async with pool.connection() as connection:
+            session_rows = await (
+                await connection.execute(
+                    f"""
+                    SELECT * FROM visual_agent.tutoring_sessions
+                    WHERE user_id = %s {subject_clause}
+                    ORDER BY updated_at DESC
+                    LIMIT %s
+                    """,
+                    params,
+                )
+            ).fetchall()
+            session_ids = [row["id"] for row in session_rows]
+            if session_ids:
+                message_rows = await (
+                    await connection.execute(
+                        """
+                        SELECT * FROM visual_agent.chat_messages
+                        WHERE user_id = %s AND session_id = ANY(%s)
+                        ORDER BY created_at ASC
+                        """,
+                        (user_id, session_ids),
+                    )
+                ).fetchall()
+            else:
+                message_rows = []
+        sessions = [ChatSessionRecord.model_validate(row) for row in session_rows]
+        messages = [ChatMessage.model_validate(row) for row in message_rows]
+        return _summarize_chat_sessions(messages, limit, subject, sessions)
+
+    async def delete_user_data(self, user_id: str) -> None:
+        pool = await self._get_pg_pool()
+        async with pool.connection() as connection:
+            await connection.execute(
+                "DELETE FROM visual_agent.tutoring_sessions WHERE user_id = %s",
+                (user_id,),
+            )
+        await super().delete_user_data(user_id)
 
 
 class SupabaseRepository:
@@ -1148,9 +1627,59 @@ class SupabaseRepository:
         )
         return MasteryRecord.model_validate(rows[0])
 
+    async def create_chat_session(
+        self,
+        user_id: str,
+        subject: Subject,
+        learning_mode: LearningMode = LearningMode.GUIDED_PROBLEM,
+    ) -> ChatSessionRecord:
+        session = ChatSessionRecord(
+            user_id=user_id, subject=subject, learning_mode=learning_mode
+        )
+        rows = await self._request(
+            "POST",
+            "tutoring_sessions",
+            service=True,
+            json=session.model_dump(mode="json"),
+        )
+        return ChatSessionRecord.model_validate(rows[0])
+
+    async def get_chat_session(
+        self, user_id: str, session_id: str
+    ) -> ChatSessionRecord | None:
+        rows = await self._request(
+            "GET",
+            "tutoring_sessions",
+            service=True,
+            params={
+                "id": f"eq.{session_id}",
+                "user_id": f"eq.{user_id}",
+                "limit": "1",
+            },
+        )
+        return ChatSessionRecord.model_validate(rows[0]) if rows else None
+
+    async def update_chat_session_mode(
+        self, user_id: str, session_id: str, learning_mode: LearningMode
+    ) -> ChatSessionRecord | None:
+        rows = await self._request(
+            "PATCH",
+            "tutoring_sessions",
+            service=True,
+            params={"id": f"eq.{session_id}", "user_id": f"eq.{user_id}"},
+            json={
+                "learning_mode": learning_mode.value,
+                "updated_at": datetime.now().isoformat(),
+            },
+        )
+        return ChatSessionRecord.model_validate(rows[0]) if rows else None
+
     async def save_chat_message(self, message: ChatMessage) -> ChatMessage:
         await self._ensure_session(
-            message.user_id, message.session_id, message.metadata.get("subject")
+            message.user_id,
+            message.session_id,
+            message.metadata.get("subject"),
+            message.metadata.get("learning_mode"),
         )
         rows = await self._request(
             "POST",
@@ -1179,28 +1708,44 @@ class SupabaseRepository:
         return [ChatMessage.model_validate(row) for row in reversed(rows)]
 
     async def list_chat_sessions(
-        self, user_id: str, limit: int = 50
+        self,
+        user_id: str,
+        limit: int = 50,
+        subject: Subject | None = None,
     ) -> list[ChatSessionSummary]:
-        rows = await self._request(
+        session_params = {
+            "user_id": f"eq.{user_id}",
+            "order": "updated_at.desc",
+            "limit": str(limit),
+        }
+        if subject is not None:
+            session_params["subject"] = f"eq.{subject.value}"
+        session_rows = await self._request(
             "GET",
-            "chat_messages",
+            "tutoring_sessions",
             service=True,
-            params={
-                "user_id": f"eq.{user_id}",
-                "order": "created_at.asc",
-                "limit": "2000",
-            },
+            params=session_params,
         )
+        session_ids = [row["id"] for row in session_rows]
+        rows = []
+        if session_ids:
+            rows = await self._request(
+                "GET",
+                "chat_messages",
+                service=True,
+                params={
+                    "user_id": f"eq.{user_id}",
+                    "session_id": f"in.({','.join(session_ids)})",
+                    "order": "created_at.asc",
+                    "limit": "5000",
+                },
+            )
         return _summarize_chat_sessions(
-            [ChatMessage.model_validate(row) for row in rows], limit
+            [ChatMessage.model_validate(row) for row in rows],
+            limit,
+            subject,
+            [ChatSessionRecord.model_validate(row) for row in session_rows],
         )
-
-    async def get_exam_trends(
-        self, subjects: list[Subject] | None = None
-    ) -> list[ExamTrend]:
-        rows = await self._request("GET", "exam_skill_trends", service=True)
-        results = [ExamTrend.model_validate(row) for row in rows]
-        return [item for item in results if not subjects or item.subject in subjects]
 
     async def retrieve_context(
         self,
@@ -1388,13 +1933,49 @@ class SupabaseRepository:
         return KnowledgeIngestionJob.model_validate(rows[0]) if rows else None
 
     async def _ensure_session(
-        self, user_id: str, session_id: str, subject: str | None
+        self,
+        user_id: str,
+        session_id: str,
+        subject: str | None,
+        learning_mode: str | None = None,
     ) -> None:
         normalized_subject = (
             subject
             if subject in {"math", "physics", "chemistry", "biology"}
             else None
         )
+        try:
+            normalized_mode = LearningMode(learning_mode).value
+        except (TypeError, ValueError):
+            normalized_mode = LearningMode.GUIDED_PROBLEM.value
+        existing = await self._request(
+            "GET",
+            "tutoring_sessions",
+            service=True,
+            params={"id": f"eq.{session_id}", "limit": "1"},
+        )
+        if existing:
+            session = existing[0]
+            if session["user_id"] != user_id:
+                raise PermissionError("Chat session belongs to another user")
+            if (
+                normalized_subject
+                and session.get("subject")
+                and session["subject"] != normalized_subject
+            ):
+                raise ValueError("Chat session belongs to another subject")
+            updates = {"updated_at": datetime.now().isoformat()}
+            if normalized_subject and not session.get("subject"):
+                updates["subject"] = normalized_subject
+            await self._request(
+                "PATCH",
+                "tutoring_sessions",
+                service=True,
+                params={"id": f"eq.{session_id}", "user_id": f"eq.{user_id}"},
+                json=updates,
+                headers={"Prefer": "return=minimal"},
+            )
+            return
         await self._request(
             "POST",
             "tutoring_sessions",
@@ -1402,11 +1983,11 @@ class SupabaseRepository:
             json={
                 "id": session_id,
                 "user_id": user_id,
-                "subject": normalized_subject,
+                "subject": normalized_subject or Subject.MATH.value,
+                "learning_mode": normalized_mode,
                 "updated_at": datetime.now().isoformat(),
             },
-            params={"on_conflict": "id"},
-            headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+            headers={"Prefer": "return=minimal"},
         )
 
     async def save_problem(
@@ -1455,89 +2036,6 @@ class SupabaseRepository:
             headers={"Prefer": "return=minimal"},
         )
 
-    async def save_exam_source(self, source: ExamSource) -> ExamSource:
-        rows = await self._request(
-            "POST",
-            "exam_sources",
-            service=True,
-            json=source.model_dump(mode="json", exclude_none=True),
-            params={"on_conflict": "url,subject"},
-            headers={"Prefer": "resolution=merge-duplicates,return=representation"},
-        )
-        return ExamSource.model_validate(rows[0])
-
-    async def save_exam_artifact(self, artifact: dict[str, Any]) -> str:
-        rows = await self._request(
-            "POST",
-            "exam_artifacts",
-            service=True,
-            json=artifact,
-            params={"on_conflict": "source_id,checksum"},
-            headers={"Prefer": "resolution=merge-duplicates,return=representation"},
-        )
-        return rows[0]["id"]
-
-    async def save_exam_questions(self, questions: list[ExamQuestion]) -> None:
-        if questions:
-            await self._request(
-                "POST",
-                "exam_questions",
-                service=True,
-                json=[item.model_dump(mode="json", exclude_none=True) for item in questions],
-                params={"on_conflict": "source_id,question_number"},
-                headers={"Prefer": "resolution=ignore-duplicates,return=minimal"},
-            )
-
-    async def list_review_queue(self, limit: int = 100) -> list[ExamQuestion]:
-        rows = await self._request(
-            "GET",
-            "exam_questions",
-            service=True,
-            params={"review_status": "eq.pending", "limit": str(limit)},
-        )
-        return [ExamQuestion.model_validate(row) for row in rows]
-
-    async def patch_review(
-        self, question_id: str, patch: ReviewPatch
-    ) -> ExamQuestion | None:
-        rows = await self._request(
-            "PATCH",
-            "exam_questions",
-            service=True,
-            params={"id": f"eq.{question_id}"},
-            json=patch.model_dump(mode="json", exclude_none=True),
-        )
-        return ExamQuestion.model_validate(rows[0]) if rows else None
-
-    async def list_approved_exam_questions(
-        self,
-        subjects: list[Subject] | None = None,
-        years: list[int] | None = None,
-    ) -> list[ExamQuestion]:
-        params = {
-            "review_status": "eq.approved",
-            "order": "exam_year.desc,question_number.asc",
-        }
-        if subjects:
-            params["subject"] = f"in.({','.join(item.value for item in subjects)})"
-        if years:
-            params["exam_year"] = f"in.({','.join(str(item) for item in years)})"
-        rows = await self._request(
-            "GET", "exam_questions", service=True, params=params
-        )
-        return [ExamQuestion.model_validate(row) for row in rows]
-
-    async def list_exam_sources(self, source_ids: list[str]) -> list[ExamSource]:
-        if not source_ids:
-            return []
-        rows = await self._request(
-            "GET",
-            "exam_sources",
-            service=True,
-            params={"id": f"in.({','.join(source_ids)})"},
-        )
-        return [ExamSource.model_validate(row) for row in rows]
-
     async def delete_user_data(self, user_id: str) -> None:
         for table in ("knowledge_ingestion_jobs", "content_documents", "chat_messages", "hint_events", "attempts", "problems", "tutoring_sessions", "mastery_records", "assets", "profiles"):
             await self._request(
@@ -1546,13 +2044,32 @@ class SupabaseRepository:
 
 
 def _summarize_chat_sessions(
-    messages: list[ChatMessage], limit: int
+    messages: list[ChatMessage],
+    limit: int,
+    subject_filter: Subject | None = None,
+    sessions: list[ChatSessionRecord] | None = None,
 ) -> list[ChatSessionSummary]:
     grouped: dict[str, list[ChatMessage]] = defaultdict(list)
     for message in messages:
         grouped[message.session_id].append(message)
+    session_by_id = {session.id: session for session in sessions or []}
     summaries: list[ChatSessionSummary] = []
-    for session_id, items in grouped.items():
+    for session_id in set(grouped) | set(session_by_id):
+        items = grouped.get(session_id, [])
+        session = session_by_id.get(session_id)
+        if not items and session is not None:
+            summary = ChatSessionSummary(
+                session_id=session.id,
+                title="Phiên mới",
+                last_message="Chưa có tin nhắn",
+                message_count=0,
+                subject=session.subject,
+                learning_mode=session.learning_mode,
+                updated_at=session.updated_at,
+            )
+            if subject_filter is None or summary.subject == subject_filter:
+                summaries.append(summary)
+            continue
         items.sort(key=lambda item: item.created_at)
         first_user = next((item for item in items if item.role == "user"), items[0])
         subject_value = next(
@@ -1564,23 +2081,32 @@ def _summarize_chat_sessions(
             None,
         )
         try:
-            subject = Subject(subject_value) if subject_value else None
+            subject = (
+                Subject(subject_value)
+                if subject_value
+                else session.subject if session is not None else None
+            )
         except ValueError:
             subject = None
         title = " ".join(first_user.content.split())
         last_message = " ".join(items[-1].content.split())
-        summaries.append(
-            ChatSessionSummary(
-                session_id=session_id,
-                title=(title[:77] + "...") if len(title) > 80 else title,
-                last_message=(last_message[:117] + "...")
-                if len(last_message) > 120
-                else last_message,
-                message_count=len(items),
-                subject=subject,
-                updated_at=items[-1].created_at,
-            )
+        summary = ChatSessionSummary(
+            session_id=session_id,
+            title=(title[:77] + "...") if len(title) > 80 else title,
+            last_message=(last_message[:117] + "...")
+            if len(last_message) > 120
+            else last_message,
+            message_count=len(items),
+            subject=subject,
+            learning_mode=(
+                session.learning_mode
+                if session is not None
+                else LearningMode.GUIDED_PROBLEM
+            ),
+            updated_at=items[-1].created_at,
         )
+        if subject_filter is None or summary.subject == subject_filter:
+            summaries.append(summary)
     return sorted(summaries, key=lambda item: item.updated_at, reverse=True)[:limit]
 
 
@@ -1624,4 +2150,8 @@ def get_repository() -> TutorRepository:
     settings = get_settings()
     if settings.supabase_service_enabled:
         return SupabaseRepository(settings)
+    if settings.database_url:
+        return PostgresChatRepository(
+            settings.database_url, settings.chat_database_path
+        )
     return _local_repository

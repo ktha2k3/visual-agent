@@ -1,4 +1,4 @@
-import time
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -13,48 +13,76 @@ def current_datetime() -> str:
     current = datetime.now(ZoneInfo(timezone_name))
     return current.isoformat() + f" ({timezone_name})"
 
+
+def _normalize_query(query: str) -> str:
+    return " ".join(query.split())[:500]
+
+
+@tool
+def tavily(query: str) -> str:
+    """Search the web with Tavily for trustworthy STEM concepts and worked examples."""
+    normalized = _normalize_query(query)
+    if not normalized:
+        return "[]"
+    try:
+        from langchain_tavily import TavilySearch
+
+        response = TavilySearch(
+            max_results=5,
+            search_depth="advanced",
+            topic="general",
+            include_answer=False,
+            include_raw_content=False,
+            include_images=False,
+        ).invoke({"query": normalized})
+    except Exception as exc:
+        return json.dumps(
+            {"error": f"Tavily search unavailable: {type(exc).__name__}"},
+            ensure_ascii=False,
+        )
+
+    results = response.get("results", []) if isinstance(response, dict) else []
+    payload = [
+        {
+            "title": str(item.get("title", ""))[:300],
+            "snippet": str(item.get("content", ""))[:1200],
+            "url": str(item.get("url", ""))[:2000],
+            "score": item.get("score"),
+        }
+        for item in results
+        if isinstance(item, dict) and item.get("url")
+    ]
+    return json.dumps(payload, ensure_ascii=False)
+
+
 @tool
 def arxiv(query: str) -> str:
-    """Search for research papers on arXiv. Input should be a plain-text search query."""
+    """Search arXiv for academic STEM papers relevant to a problem or method."""
+    normalized = _normalize_query(query)
+    if not normalized:
+        return "No arXiv query was provided."
     try:
-        import arxiv as _arxiv
-    except ImportError:
-        return "arXiv integration is not installed."
-    arxiv_client = _arxiv.Client()
-    search = _arxiv.Search(
-        query=query,
-        max_results=5,
-        sort_by=_arxiv.SortCriterion.Relevance,
-    )
-    for attempt in range(3):
-        try:
-            results = list(arxiv_client.results(search))
-            if not results:
-                return "No papers found for that query."
-            parts = []
-            for r in results[:2]:
-                authors = ", ".join(str(a) for a in r.authors[:3])
-                parts.append(
-                    f"Title: {r.title}\n"
-                    f"Authors: {authors}\n"
-                    f"Summary: {r.summary[:600]}\n"
-                    f"URL: {r.entry_id}"
-                )
-            return "\n\n---\n\n".join(parts)
-        except Exception as exc:
-            msg = str(exc)
-            if "429" in msg or "too many requests" in msg.lower():
-                if attempt < 2:
-                    time.sleep(12 * (attempt + 1))
-                    continue
-                return "arXiv rate-limited after retries. Please try again later."
-            return f"arXiv error: {msg}"
-    return "arXiv search failed."
+        from langchain_community.tools import ArxivQueryRun
+        from langchain_community.utilities import ArxivAPIWrapper
+
+        runner = ArxivQueryRun(
+            api_wrapper=ArxivAPIWrapper(
+                top_k_results=3,
+                load_max_docs=3,
+                doc_content_chars_max=3000,
+            )
+        )
+        return runner.invoke(normalized)
+    except Exception as exc:
+        return f"arXiv search unavailable: {type(exc).__name__}"
 
 
 @tool
 def wikipedia(query: str) -> str:
-    """Search Wikipedia for optional background information, never exam statistics."""
+    """Search Wikipedia for optional STEM background information."""
+    normalized = _normalize_query(query)
+    if not normalized:
+        return "No Wikipedia query was provided."
     try:
         import wikipedia as wiki_package
         from langchain_community.tools import WikipediaQueryRun
@@ -67,4 +95,7 @@ def wikipedia(query: str) -> str:
     runner = WikipediaQueryRun(
         api_wrapper=WikipediaAPIWrapper(top_k_results=2, doc_content_chars_max=2000)
     )
-    return runner.invoke(query)
+    try:
+        return runner.invoke(normalized)
+    except Exception as exc:
+        return f"Wikipedia search unavailable: {type(exc).__name__}"

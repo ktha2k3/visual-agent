@@ -8,24 +8,18 @@ import { accessToken, authHeaders, supabase } from './supabase'
 const SUBJECTS = [
   { id: 'math', label: 'Toán', icon: '∫' },
   { id: 'physics', label: 'Vật lí', icon: '⚛' },
-  { id: 'chemistry', label: 'Hóa học', icon: '⚗' },
-  { id: 'biology', label: 'Sinh học', icon: '🧬' },
 ]
 const SUBJECT_LABEL = Object.fromEntries(SUBJECTS.map(item => [item.id, item.label]))
-const SESSION_KEY = 'stem_tutor_session'
-const KNOWLEDGE_SELECTION_KEY = 'stem_tutor_knowledge_selection'
+const LEARNING_MODES = [
+  { id: 'concept', label: 'Hiểu sâu khái niệm' },
+  { id: 'guided_problem', label: 'Giải bài từng bước' },
+]
+const LEARNING_MODE_LABEL = Object.fromEntries(LEARNING_MODES.map(item => [item.id, item.label]))
+const DEFAULT_LEARNING_MODE = 'guided_problem'
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
 function assertUploadSize(file) {
   if (file?.size > MAX_UPLOAD_BYTES) throw new Error('Tệp vượt quá giới hạn 25 MB.')
-}
-
-function sessionId() {
-  const existing = localStorage.getItem(SESSION_KEY)
-  if (existing) return existing
-  const value = crypto.randomUUID()
-  localStorage.setItem(SESSION_KEY, value)
-  return value
 }
 
 async function apiFetch(path, options = {}) {
@@ -48,19 +42,23 @@ async function streamTutorWebSocket(request, onEvent) {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(websocketUrl('/api/tutor/ws'))
     let settled = false
-    let receivedEvent = false
+    let receivedResponseContent = false
     const fail = (message) => {
       if (settled) return
       settled = true
       const error = new Error(message)
-      error.canFallback = !receivedEvent
+      // Stage/progress frames are safe to replay through SSE with the same
+      // request_id. Once answer content is visible, retrying could duplicate it.
+      error.canFallback = !receivedResponseContent
       reject(error)
     }
     socket.onopen = () => socket.send(JSON.stringify({ access_token: token, request }))
     socket.onmessage = (message) => {
-      receivedEvent = true
       try {
         const event = JSON.parse(message.data)
+        if (['token', 'hint', 'feedback', 'visualization'].includes(event.type)) {
+          receivedResponseContent = true
+        }
         onEvent(event)
         if (event.type === 'done' && !settled) {
           settled = true
@@ -72,8 +70,11 @@ async function streamTutorWebSocket(request, onEvent) {
       }
     }
     socket.onerror = () => fail('WebSocket connection failed')
-    socket.onclose = () => {
-      if (!settled) fail('WebSocket closed before the response completed')
+    socket.onclose = (event) => {
+      if (!settled) {
+        const reason = event.reason ? `: ${event.reason}` : ''
+        fail(`WebSocket closed before the response completed (code ${event.code})${reason}`)
+      }
     }
   })
 }
@@ -156,7 +157,7 @@ function Login() {
   )
 }
 
-function ProgressPanel({ stages, problem, hintLevel, citations }) {
+function ProgressPanel({ stages, problem, hintLevel, citations, learningPlan }) {
   const [draft, setDraft] = useState('')
   useEffect(() => { setDraft(problem?.problem_markdown || '') }, [problem])
   return (
@@ -166,6 +167,13 @@ function ProgressPanel({ stages, problem, hintLevel, citations }) {
         {stages.length === 0 && <li className="muted">Các bước xử lý sẽ xuất hiện tại đây.</li>}
         {stages.map((stage, index) => <li key={`${stage.stage}-${index}`} className={index === stages.length - 1 ? 'current' : 'complete'}><span>{index < stages.length - 1 ? '✓' : '•'}</span>{stage.label}</li>)}
       </ol>
+      {learningPlan && <section className="learning-plan-card">
+        <span className="eyebrow">Định hướng của Supervisor</span>
+        <div><strong>{learningPlan.understanding_label}</strong><small>độ tin cậy {Math.round((learningPlan.confidence || 0) * 100)}%</small></div>
+        <h3>{learningPlan.concept}</h3>
+        <p>{learningPlan.assessment_summary}</p>
+        <ol>{(learningPlan.approaches || []).map(item => <li key={item.level}><b>{item.title}</b><span>{item.focus}</span></li>)}</ol>
+      </section>}
       {problem && <section className="transcription-card"><span className="eyebrow">Bản chép đề · {Math.round(problem.confidence * 100)}%</span>
         <textarea value={draft} onChange={e => setDraft(e.target.value)} aria-label="Bản chép đề" />
         <p>Bạn có thể sửa rồi gửi nội dung này ở khung chat để xác nhận.</p></section>}
@@ -206,9 +214,10 @@ function KnowledgePanel({ subject, selectedDocumentIds, onSelectionChange, onClo
 
   useEffect(() => {
     let active = true
+    const subjectQuery = encodeURIComponent(subject)
     const refresh = () => Promise.all([
-      apiFetch('/api/knowledge/jobs?limit=50').then(response => response.json()),
-      apiFetch('/api/knowledge/documents?limit=50').then(response => response.json()),
+      apiFetch(`/api/knowledge/jobs?limit=50&subject=${subjectQuery}`).then(response => response.json()),
+      apiFetch(`/api/knowledge/documents?limit=50&subject=${subjectQuery}`).then(response => response.json()),
     ])
       .then(([jobPayload, documentPayload]) => {
         if (active) {
@@ -299,82 +308,29 @@ function KnowledgePanel({ subject, selectedDocumentIds, onSelectionChange, onClo
   </section></div>
 }
 
-function ChatHistoryPanel({ currentSessionId, onClose, onSelect }) {
+function ChatHistoryPanel({ subject, currentSessionId, onClose, onSelect }) {
   const [sessions, setSessions] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    apiFetch('/api/chat/sessions?limit=50')
+    apiFetch(`/api/chat/sessions?limit=50&subject=${encodeURIComponent(subject)}`)
       .then(response => response.json())
       .then(payload => setSessions(payload.items || []))
       .catch(err => setError(err.message))
       .finally(() => setLoading(false))
-  }, [])
+  }, [subject])
 
   return <div className="admin-overlay"><section className="admin-panel chat-history-panel">
-    <header><div><span className="eyebrow">Dữ liệu hội thoại</span><h2>Lịch sử phiên chat</h2></div><button onClick={onClose}>Đóng</button></header>
+    <header><div><span className="eyebrow">Dữ liệu hội thoại</span><h2>Lịch sử môn {SUBJECT_LABEL[subject]}</h2></div><button onClick={onClose}>Đóng</button></header>
     {loading && <p>Đang tải lịch sử…</p>}
     {error && <div className="error-banner">{error}</div>}
     {!loading && !error && sessions.length === 0 && <div className="history-empty"><strong>Chưa có phiên chat đã lưu</strong><span>Phiên sẽ xuất hiện sau khi bạn gửi tin nhắn đầu tiên và backend ghi nhận hội thoại.</span></div>}
     {sessions.length > 0 && <div className="chat-session-list">{sessions.map(session => <button key={session.session_id} className={session.session_id === currentSessionId ? 'active' : ''} onClick={() => onSelect(session)}>
       <div><strong>{session.title}</strong>{session.subject && <span>{SUBJECT_LABEL[session.subject]}</span>}</div>
       <p>{session.last_message}</p>
-      <small>{session.message_count} tin nhắn · {new Date(session.updated_at).toLocaleString('vi-VN')}</small>
+      <small>{LEARNING_MODE_LABEL[session.learning_mode] || LEARNING_MODE_LABEL[DEFAULT_LEARNING_MODE]} · {session.message_count} tin nhắn · {new Date(session.updated_at).toLocaleString('vi-VN')}</small>
     </button>)}</div>}
-  </section></div>
-}
-
-function ExamPlanPanel({ subject, onClose }) {
-  const [plan, setPlan] = useState(null)
-  const [error, setError] = useState('')
-  const [targetScore, setTargetScore] = useState('')
-  useEffect(() => {
-    setPlan(null); setError('')
-    const query = targetScore ? `?target_score=${encodeURIComponent(targetScore)}` : ''
-    apiFetch(`/api/me/exam-plan/${subject}${query}`)
-      .then(response => response.json())
-      .then(setPlan)
-      .catch(err => setError(err.message))
-  }, [subject, targetScore])
-
-  const research = plan?.research
-  return <div className="admin-overlay"><section className="admin-panel exam-plan-panel">
-    <header><div><span className="eyebrow">Research → Supervisor</span><h2>Lộ trình điểm thi {SUBJECT_LABEL[subject]}</h2></div><button onClick={onClose}>Đóng</button></header>
-    <section className="exam-plan-guide">
-      <div><h3>Cách sử dụng</h3><ol>
-        <li>Chọn môn trên thanh điều hướng trước khi mở lộ trình.</li>
-        <li>Chọn mức điểm mục tiêu để chỉ xem kế hoạch phù hợp, hoặc xem toàn bộ bốn thang điểm.</li>
-        <li>Học theo thứ tự ưu tiên và các bước đề xuất. Tiếp tục làm bài trong chat để hệ thống cập nhật năng lực thực tế.</li>
-      </ol></div>
-      <label>Mục tiêu điểm
-        <select value={targetScore} onChange={event => setTargetScore(event.target.value)}>
-          <option value="">Xem tất cả thang điểm</option>
-          <option value="5">Đạt 5 điểm</option>
-          <option value="7">Đạt 7 điểm</option>
-          <option value="8.5">Đạt 8,5 điểm</option>
-          <option value="10">Hướng tới 10 điểm</option>
-        </select>
-      </label>
-      <small>Lộ trình dựa trên câu thi đã duyệt của hai kỳ thi hoàn tất gần nhất và hồ sơ năng lực tích lũy từ hoạt động học của bạn.</small>
-    </section>
-    {!plan && !error && <p>Đang phân tích các câu hỏi đã duyệt của hai kỳ thi hoàn tất gần nhất…</p>}
-    {error && <div className="error-banner">{error}</div>}
-    {research && <>
-      <section className={`research-summary ${research.status}`}>
-        <div><strong>{research.status === 'ready' ? `Phân tích ${research.years.join('–')}` : research.status === 'partial' ? 'Dữ liệu một năm' : 'Chưa đủ dữ liệu'}</strong><span>{research.approved_question_count} câu đã duyệt</span></div>
-        <small>Cập nhật {new Date(research.generated_at).toLocaleString('vi-VN')} · {research.timezone}</small>
-        {research.notes.map((note, index) => <p key={index}>{note}</p>)}
-      </section>
-      {research.skills.length > 0 && <section className="exam-distribution"><h3>Phân bổ kiến thức</h3>{research.skills.slice(0, 8).map(skill => <div key={skill.skill_id}><span>{skill.title}</span><i><b style={{ width: `${Math.max(3, skill.weighted_prevalence * 100)}%` }} /></i><strong>{Math.round(skill.weighted_prevalence * 100)}%</strong><small>Độ khó {skill.average_difficulty}/5</small></div>)}</section>}
-      {research.sources.length > 0 && <section className="exam-sources"><h3>Nguồn đề</h3>{research.sources.map(source => <a key={source.url} href={source.url} target="_blank" rel="noreferrer">{source.exam_year} · {source.publisher}</a>)}</section>}
-      <div className="score-band-list">{plan.score_bands.map(item => <article key={item.band}>
-        <header><strong>{item.band} điểm</strong><span>Mastery mục tiêu {Math.round(item.target_mastery * 100)}%</span></header>
-        <small>Trọng tâm: {item.cognitive_focus.join(', ')} · cá nhân hóa {Math.round(item.personalization_confidence * 100)}%</small>
-        <ol>{item.priorities.slice(0, 4).map(priority => <li key={priority.skill_id}><b>{priority.title}</b><span>{priority.reason}</span></li>)}</ol>
-        <details><summary>Các bước thực hiện</summary><ul>{item.steps.map((step, index) => <li key={index}>{step}</li>)}</ul></details>
-      </article>)}</div>
-    </>}
   </section></div>
 }
 
@@ -382,6 +338,8 @@ export default function App() {
   const [authSession, setAuthSession] = useState(supabase ? null : { user: { email: 'dev@local' } })
   const [loadingAuth, setLoadingAuth] = useState(Boolean(supabase))
   const [subject, setSubject] = useState('math')
+  const [learningMode, setLearningMode] = useState(DEFAULT_LEARNING_MODE)
+  const [modeBusy, setModeBusy] = useState(false)
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [asset, setAsset] = useState(null)
@@ -389,37 +347,80 @@ export default function App() {
   const [hasStreamingToken, setHasStreamingToken] = useState(false)
   const [stages, setStages] = useState([])
   const [problem, setProblem] = useState(null)
+  const [learningPlan, setLearningPlan] = useState(null)
   const [hintLevel, setHintLevel] = useState(0)
   const [citations, setCitations] = useState([])
   const [mastery, setMastery] = useState([])
   const [masterySummary, setMasterySummary] = useState(null)
   const [recommendations, setRecommendations] = useState([])
-  const [selectedKnowledgeDocuments, setSelectedKnowledgeDocuments] = useState(() => {
-    try {
-      const stored = JSON.parse(localStorage.getItem(KNOWLEDGE_SELECTION_KEY) || '[]')
-      return Array.isArray(stored) ? stored.filter(item => typeof item === 'string') : []
-    } catch (_error) {
-      return []
-    }
-  })
+  const [selectedKnowledgeDocuments, setSelectedKnowledgeDocuments] = useState([])
+  const [sessionLoading, setSessionLoading] = useState(true)
   const [error, setError] = useState('')
   const [showKnowledge, setShowKnowledge] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
-  const [showExamPlan, setShowExamPlan] = useState(false)
   const fileRef = useRef(null)
   const endRef = useRef(null)
-  const currentSession = useRef(sessionId())
+  const currentSession = useRef(null)
+  const activeSubjectSessions = useRef({})
+  const activeSubjectModes = useRef({})
+  const pendingSubjectSessions = useRef({})
+  const sessionOwner = useRef(null)
+  const sessionLoadGeneration = useRef(0)
 
-  const loadSession = useCallback(async (selectedSessionId) => {
+  const loadSession = useCallback(async (selectedSessionId, selectedSubject) => {
     currentSession.current = selectedSessionId
-    localStorage.setItem(SESSION_KEY, selectedSessionId)
-    setStages([]); setCitations([]); setProblem(null); setHintLevel(0); setError('')
+    setMessages([]); setStages([]); setCitations([]); setProblem(null); setLearningPlan(null); setHintLevel(0); setError('')
     const response = await apiFetch(`/api/history/${selectedSessionId}`)
     const payload = await response.json()
+    if (currentSession.current !== selectedSessionId) return
     setMessages(Array.isArray(payload.messages) ? payload.messages.map(item => ({ role: item.role, text: item.content, visualization: item.metadata?.visualization || null })) : [])
     if (payload.problem) setProblem(payload.problem)
+    if (payload.learning_plan) setLearningPlan(payload.learning_plan)
+    const restoredMode = payload.learning_mode || DEFAULT_LEARNING_MODE
+    activeSubjectModes.current[selectedSubject] = restoredMode
+    setLearningMode(restoredMode)
     setHintLevel(payload.hint_level || 0)
   }, [])
+
+  const openSubjectSession = useCallback(async (selectedSubject) => {
+    const generation = ++sessionLoadGeneration.current
+    setSessionLoading(true)
+    currentSession.current = null
+    try {
+      let selectedSessionId = activeSubjectSessions.current[selectedSubject]
+      if (!selectedSessionId) {
+        // React StrictMode runs effects twice in development. Reuse the same
+        // in-flight request so entering a subject creates exactly one session.
+        if (!pendingSubjectSessions.current[selectedSubject]) {
+          const ownerAtStart = sessionOwner.current
+          const creation = apiFetch('/api/chat/sessions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ subject: selectedSubject, learning_mode: DEFAULT_LEARNING_MODE }),
+          })
+            .then(response => response.json())
+            .then(created => {
+              if (sessionOwner.current === ownerAtStart) {
+                activeSubjectSessions.current[selectedSubject] = created.id
+                activeSubjectModes.current[selectedSubject] = created.learning_mode || DEFAULT_LEARNING_MODE
+              }
+              return created.id
+            })
+            .finally(() => {
+              if (pendingSubjectSessions.current[selectedSubject] === creation) {
+                delete pendingSubjectSessions.current[selectedSubject]
+              }
+            })
+          pendingSubjectSessions.current[selectedSubject] = creation
+        }
+        selectedSessionId = await pendingSubjectSessions.current[selectedSubject]
+      }
+      if (generation !== sessionLoadGeneration.current) return
+      await loadSession(selectedSessionId, selectedSubject)
+    } finally {
+      if (generation === sessionLoadGeneration.current) setSessionLoading(false)
+    }
+  }, [loadSession])
 
   useEffect(() => {
     if (!supabase) return
@@ -428,22 +429,31 @@ export default function App() {
     return () => data.subscription.unsubscribe()
   }, [])
 
+  const authIdentity = authSession?.user?.id || authSession?.user?.email || null
+  useEffect(() => {
+    if (sessionOwner.current === authIdentity) return
+    sessionOwner.current = authIdentity
+    activeSubjectSessions.current = {}
+    activeSubjectModes.current = {}
+    pendingSubjectSessions.current = {}
+    currentSession.current = null
+    sessionLoadGeneration.current += 1
+  }, [authIdentity])
+
   const loadProfile = useCallback(async () => {
     if (!authSession) return
-    const [masteryResponse, recResponse] = await Promise.all([apiFetch('/api/me/mastery'), apiFetch('/api/me/recommendations')])
+    const subjectQuery = encodeURIComponent(subject)
+    const [masteryResponse, recResponse] = await Promise.all([apiFetch(`/api/me/mastery?subject=${subjectQuery}`), apiFetch(`/api/me/recommendations?subject=${subjectQuery}`)])
     const masteryPayload = await masteryResponse.json()
     setMastery(masteryPayload.items)
     setMasterySummary(masteryPayload.summary)
     setRecommendations((await recResponse.json()).items)
-  }, [authSession])
+  }, [authSession, subject])
   useEffect(() => { loadProfile().catch(err => setError(err.message)) }, [loadProfile])
   useEffect(() => {
-    localStorage.setItem(KNOWLEDGE_SELECTION_KEY, JSON.stringify(selectedKnowledgeDocuments))
-  }, [selectedKnowledgeDocuments])
-  useEffect(() => {
     if (!authSession) return
-    loadSession(currentSession.current).catch(err => setError(err.message))
-  }, [authSession, loadSession])
+    openSubjectSession(subject).catch(err => { setError(err.message); setSessionLoading(false) })
+  }, [authSession, subject, openSubjectSession])
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, busy])
 
   const upload = async (file) => {
@@ -456,9 +466,37 @@ export default function App() {
     setAsset({ ...payload, name: file.name, localPreview: URL.createObjectURL(file) })
   }
 
+  const selectLearningMode = async (nextMode) => {
+    if (modeBusy || busy || sessionLoading || nextMode === learningMode) return
+    const sessionId = currentSession.current
+    if (!sessionId) return
+    setModeBusy(true); setError('')
+    try {
+      const response = await apiFetch(`/api/chat/sessions/${sessionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ learning_mode: nextMode }),
+      })
+      const session = await response.json()
+      if (currentSession.current !== sessionId) return
+      const confirmedMode = session.learning_mode || nextMode
+      activeSubjectModes.current[subject] = confirmedMode
+      setLearningMode(confirmedMode)
+      setLearningPlan(null)
+      setHintLevel(0)
+    } finally {
+      setModeBusy(false)
+    }
+  }
+
   const handleEvent = (event) => {
     if (event.type === 'stage') setStages(current => [...current, event])
     if (event.type === 'problem_extracted') setProblem(event.problem)
+    if (event.type === 'learning_plan') setLearningPlan(event.plan)
+    if (event.type === 'mode_selected' && event.learning_mode) {
+      activeSubjectModes.current[subject] = event.learning_mode
+      setLearningMode(event.learning_mode)
+    }
     if (event.type === 'citation') setCitations(current => current.some(item => item.url === event.url) ? current : [...current, event])
     if (event.type === 'visualization' && event.success) {
       setHasStreamingToken(true)
@@ -503,7 +541,7 @@ export default function App() {
   }
 
   const send = async () => {
-    if (busy || (!input.trim() && !asset)) return
+    if (busy || modeBusy || sessionLoading || !currentSession.current || (!input.trim() && !asset)) return
     const visibleText = input.trim() || 'Phân tích bài trong ảnh này.'
     const requestText = `Môn ${SUBJECT_LABEL[subject]}. ${visibleText}`
     setMessages(current => [...current, { role: 'user', text: visibleText, image: asset?.localPreview }])
@@ -519,6 +557,7 @@ export default function App() {
         attachment_ids: attachmentIds,
         knowledge_document_ids: selectedKnowledgeDocuments,
         subject,
+        learning_mode: learningMode,
       }
       try {
         await streamTutorWebSocket(request, handleEvent)
@@ -529,10 +568,41 @@ export default function App() {
     } catch (err) { setError(err.message) } finally { setBusy(false) }
   }
 
-  const newSession = () => {
-    currentSession.current = crypto.randomUUID(); localStorage.setItem(SESSION_KEY, currentSession.current)
-    setMessages([]); setStages([]); setProblem(null); setCitations([]); setHintLevel(0); setHasStreamingToken(false)
-    setShowHistory(false)
+  const newSession = async () => {
+    if (busy || modeBusy || sessionLoading) return
+    setSessionLoading(true)
+    try {
+      const response = await apiFetch('/api/chat/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subject, learning_mode: learningMode }),
+      })
+      const createdSessionId = (await response.json()).id
+      activeSubjectSessions.current[subject] = createdSessionId
+      activeSubjectModes.current[subject] = learningMode
+      currentSession.current = createdSessionId
+      setMessages([]); setStages([]); setProblem(null); setLearningPlan(null); setCitations([]); setHintLevel(0); setHasStreamingToken(false)
+      setInput('')
+      if (asset?.localPreview) URL.revokeObjectURL(asset.localPreview)
+      setAsset(null)
+      if (fileRef.current) fileRef.current.value = ''
+      setShowHistory(false)
+    } finally {
+      setSessionLoading(false)
+    }
+  }
+
+  const switchSubject = (nextSubject) => {
+    if (busy || modeBusy || nextSubject === subject) return
+    currentSession.current = null
+    setSessionLoading(true)
+    setMessages([]); setStages([]); setProblem(null); setLearningPlan(null); setCitations([]); setHintLevel(0); setHasStreamingToken(false)
+    setInput('')
+    if (asset?.localPreview) URL.revokeObjectURL(asset.localPreview)
+    setAsset(null)
+    if (fileRef.current) fileRef.current.value = ''
+    setSelectedKnowledgeDocuments([])
+    setSubject(nextSubject)
   }
 
   if (loadingAuth) return <div className="loading-screen">Đang khởi tạo…</div>
@@ -540,25 +610,33 @@ export default function App() {
 
   return (
     <div className="app-shell"><header className="topbar"><div className="brand"><span>ST</span><div><b>STEM Tutor</b><small>CTGDPT 2018 · Lớp 12</small></div></div>
-      <nav>{SUBJECTS.map(item => <button key={item.id} className={subject === item.id ? 'active' : ''} onClick={() => setSubject(item.id)}><i>{item.icon}</i>{item.label}</button>)}</nav>
-      <div className="account-actions"><button onClick={() => setShowExamPlan(true)}>Lộ trình điểm</button><button onClick={() => setShowKnowledge(true)}>Học liệu</button><button onClick={() => setShowHistory(true)}>Lịch sử</button><button onClick={newSession}>Phiên mới</button>{supabase && <button onClick={() => supabase.auth.signOut()}>Đăng xuất</button>}</div></header>
-      <div className="workspace"><ProgressPanel stages={stages} problem={problem} hintLevel={hintLevel} citations={citations} />
-        <main className="chat-panel"><header><span className="subject-icon">{SUBJECTS.find(item => item.id === subject)?.icon}</span><div><h1>Học {SUBJECT_LABEL[subject]}</h1><p>Hãy gửi đề và cách bạn đã thử. Mình sẽ gợi mở từng bước.</p></div></header>
-          <section className="messages">{messages.length === 0 && <div className="welcome"><span>✦</span><h2>Bắt đầu từ một bài bạn đang vướng</h2><p>Chụp rõ toàn bộ đề, hoặc nhập câu hỏi và phần bạn đã làm.</p></div>}
+      <nav>{SUBJECTS.map(item => <button key={item.id} className={subject === item.id ? 'active' : ''} disabled={busy || modeBusy} onClick={() => switchSubject(item.id)}><i>{item.icon}</i>{item.label}</button>)}</nav>
+      <div className="account-actions"><button onClick={() => setShowKnowledge(true)}>Học liệu</button><button onClick={() => setShowHistory(true)}>Lịch sử</button><button disabled={sessionLoading || busy || modeBusy} onClick={() => newSession().catch(err => setError(err.message))}>Phiên mới</button>{supabase && <button onClick={() => supabase.auth.signOut()}>Đăng xuất</button>}</div></header>
+      <div className="workspace"><ProgressPanel stages={stages} problem={problem} hintLevel={hintLevel} citations={citations} learningPlan={learningPlan} />
+        <main className="chat-panel"><header><span className="subject-icon">{SUBJECTS.find(item => item.id === subject)?.icon}</span><div><h1>Học {SUBJECT_LABEL[subject]}</h1><p>{LEARNING_MODE_LABEL[learningMode]}</p></div><div className="mode-switch" role="group" aria-label="Chế độ học">{LEARNING_MODES.map(mode => <button key={mode.id} className={learningMode === mode.id ? 'active' : ''} disabled={busy || modeBusy || sessionLoading} onClick={() => selectLearningMode(mode.id).catch(err => { setError(err.message); setModeBusy(false) })}>{mode.label}</button>)}</div></header>
+          <section className="messages">{messages.length === 0 && <div className="welcome"><h2>Bạn muốn học theo cách nào?</h2><p>Mode được lưu cùng phiên và điều khiển Supervisor, Research Agent và Tutor.</p><div className="learning-mode-actions">{LEARNING_MODES.map(mode => <button key={mode.id} className={learningMode === mode.id ? 'active' : ''} disabled={modeBusy || sessionLoading} onClick={() => selectLearningMode(mode.id).catch(err => { setError(err.message); setModeBusy(false) })}>{mode.label}</button>)}</div></div>}
             {messages.map((message, index) => <article className={`message ${message.role}`} key={index}><span>{message.role === 'user' ? 'Bạn' : 'ST'}</span><div>{message.image && <img src={message.image} alt="Bài tập đã gửi" />}{message.visualization && <AuthenticatedVideo visualization={message.visualization} />}<Markdown>{message.text}</Markdown></div></article>)}
             {busy && !hasStreamingToken && <article className="message assistant"><span>ST</span><div className="typing"><i /><i /><i /></div></article>}<div ref={endRef} /></section>
           {error && <div className="error-banner">{error}<button onClick={() => setError('')}>×</button></div>}
           <footer className="composer">{asset && <div className="attachment"><img src={asset.localPreview} alt="preview" /><span>{asset.name}</span><button onClick={() => setAsset(null)}>×</button></div>}
             <div><button className="attach" onClick={() => fileRef.current?.click()} aria-label="Đính kèm ảnh">＋</button><input ref={fileRef} hidden type="file" accept="image/*" onChange={e => upload(e.target.files?.[0]).catch(err => setError(err.message))} />
-              <textarea value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} placeholder="Bạn đã thử bước nào?" />
-              <button className="send" onClick={send} disabled={busy || (!input.trim() && !asset)}>Gửi</button></div><small>Ảnh tối đa 25 MB. Trợ giảng có thể mắc lỗi; hãy kiểm tra công thức và nguồn trước khi sử dụng.</small></footer>
+              <textarea value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} placeholder={learningMode === 'concept' ? 'Nhập khái niệm bạn muốn hiểu sâu…' : 'Nhập đề bài và phần bạn đã thử…'} />
+              <button className="send" onClick={send} disabled={busy || modeBusy || sessionLoading || !currentSession.current || (!input.trim() && !asset)}>Gửi</button></div><small>{sessionLoading ? 'Đang tạo hoặc khôi phục phiên từ cơ sở dữ liệu…' : `Mode hiện tại: ${LEARNING_MODE_LABEL[learningMode]} · Ảnh tối đa 25 MB.`}</small></footer>
         </main><MasteryPanel mastery={mastery} summary={masterySummary} recommendations={recommendations} /></div>
       {showKnowledge && <KnowledgePanel subject={subject} selectedDocumentIds={selectedKnowledgeDocuments} onSelectionChange={setSelectedKnowledgeDocuments} onClose={() => setShowKnowledge(false)} />}
-      {showHistory && <ChatHistoryPanel currentSessionId={currentSession.current} onClose={() => setShowHistory(false)} onSelect={session => {
-        if (session.subject) setSubject(session.subject)
-        loadSession(session.session_id).then(() => setShowHistory(false)).catch(err => setError(err.message))
+      {showHistory && <ChatHistoryPanel subject={subject} currentSessionId={currentSession.current} onClose={() => setShowHistory(false)} onSelect={session => {
+        const selectedSubject = session.subject || subject
+        if (selectedSubject !== subject) {
+          setError('Phiên chat không thuộc môn đang chọn.')
+          setShowHistory(false)
+          return
+        }
+        currentSession.current = session.session_id
+        activeSubjectSessions.current[subject] = session.session_id
+        activeSubjectModes.current[subject] = session.learning_mode || DEFAULT_LEARNING_MODE
+        loadSession(session.session_id, selectedSubject).catch(err => setError(err.message))
+        setShowHistory(false)
       }} />}
-      {showExamPlan && <ExamPlanPanel subject={subject} onClose={() => setShowExamPlan(false)} />}
     </div>
   )
 }

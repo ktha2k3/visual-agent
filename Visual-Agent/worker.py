@@ -14,7 +14,6 @@ if __name__ == "__main__":
     Worker(
         [
             Queue("knowledge-ingestion", connection=connection),
-            Queue("exam-ingestion", connection=connection),
         ],
         connection=connection,
     ).work()

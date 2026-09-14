@@ -1,10 +1,13 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS python-base
 
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
 
-# libmagic1 is a system library required by python-magic
+# Runtime libraries used by image decoding, python-magic, FFmpeg and Manim.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libmagic1 \
     libgl1 \
@@ -13,23 +16,58 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     libxrender1 \
     libxcb1 \
+    libcairo2 \
+    libpango-1.0-0 \
     ffmpeg \
+    dvisvgm \
+    fonts-noto-core \
+    texlive-latex-base \
+    texlive-latex-extra \
+    texlive-fonts-recommended \
+    && rm -rf /var/lib/apt/lists/*
+
+
+FROM python-base AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
     libcairo2-dev \
     libpango1.0-dev \
-    texlive-latex-base \
-    texlive-latex-extra \
-    texlive-fonts-recommended \
-    dvisvgm \
-    fonts-noto-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m venv "$VIRTUAL_ENV" \
+    && pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+
+FROM builder AS development
+
+COPY requirements-dev.txt ./
+RUN pip install --no-cache-dir -r requirements-dev.txt
 
 COPY . .
 
 EXPOSE 8000
 
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "120"]
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-exclude", "data/*.py", "--reload-exclude", "data/*/*.py", "--reload-exclude", "data/*/*/*.py", "--reload-exclude", "data/*/*/*/*.py", "--reload-exclude", "tests/*.py", "--timeout-keep-alive", "120"]
+
+
+FROM python-base AS production
+
+COPY --from=builder /opt/venv /opt/venv
+COPY . .
+
+EXPOSE 8000
+
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "120"]
+
+
+# Optional image for the legacy object-detection tool. It is deliberately kept
+# out of the default STEM tutor image because Ultralytics pulls large Torch/CUDA
+# wheels and is not used by the normal perception/tutoring flow.
+FROM development AS development-yolo
+
+COPY requirements-yolo.txt ./
+RUN pip install --no-cache-dir -r requirements-yolo.txt

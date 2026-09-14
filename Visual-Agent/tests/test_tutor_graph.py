@@ -212,7 +212,149 @@ async def test_only_assessable_chat_answers_update_mastery(monkeypatch):
     records = await repository.get_mastery("student")
 
     assert first["assessed_skill_ids"] == ["math.derivatives"]
+    assert first["learning_plan"]["evidence_count"] == 1
+    assert first["learning_plan"]["understanding_level"] == "developing"
     assert second["assessed_skill_ids"] == []
     assert len(records) == 1
     assert records[0].attempts == 1
     assert records[0].mastery == 0.65
+
+
+@pytest.mark.asyncio
+async def test_solution_request_uses_research_report_as_tutor_context(monkeypatch):
+    async def fake_extract(self, *, message, images):
+        return ProblemExtraction(
+            subject=Subject.MATH,
+            problem_markdown="Tính đạo hàm của x^3",
+            skill_ids=["math.derivatives"],
+            confidence=0.95,
+        )
+
+    prompts = []
+
+    class FakeAssessment:
+        async def ainvoke(self, messages):
+            return TutorAssessment()
+
+    class StreamingModel:
+        async def astream(self, messages):
+            prompts.append(messages[-1].content)
+            yield AIMessageChunk(content="Hãy bắt đầu với quy tắc lũy thừa.")
+
+        def with_structured_output(self, schema, **kwargs):
+            return FakeAssessment()
+
+    class FakeEmbedding:
+        async def aembed_query(self, query):
+            return [0.0] * 768
+
+    class FakeResearcher:
+        def __init__(self):
+            self.calls = []
+
+        async def research(self, **kwargs):
+            self.calls.append(kwargs)
+            return "Quy tắc: (x^n)' = nx^(n-1). Nguồn: https://example.edu/power-rule"
+
+    researcher = FakeResearcher()
+    monkeypatch.setattr("education.tutor_graph.ProblemPerception.extract", fake_extract)
+    monkeypatch.setattr("education.tutor_graph.get_chat_model", lambda role: StreamingModel())
+    monkeypatch.setattr("education.tutor_graph.get_embedding_model", lambda: FakeEmbedding())
+    graph = build_tutor_graph(
+        MemoryRepository(),
+        _Storage(),
+        checkpointer=MemorySaver(),
+        research_service=researcher,
+    )
+    result = await graph.ainvoke(
+        {
+            "user_id": "student",
+            "session_id": "research",
+            "message": "Hãy tính đạo hàm của x^3",
+            "attachment_ids": [],
+            "conversation": [
+                {"role": "user", "content": "Hãy tính đạo hàm của x^3"}
+            ],
+        },
+        {"configurable": {"thread_id": "student:research"}},
+    )
+
+    assert len(researcher.calls) == 1
+    assert researcher.calls[0]["problem"] == "Tính đạo hàm của x^3"
+    assert "https://example.edu/power-rule" in prompts[-1]
+    assert "quy tắc lũy thừa" in result["tutor_response"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_mode_controls_tutor_system_policy(monkeypatch):
+    async def fake_extract(self, *, message, images):
+        return ProblemExtraction(
+            subject=Subject.MATH,
+            problem_markdown="Đạo hàm",
+            skill_ids=["math.derivatives"],
+            confidence=0.95,
+        )
+
+    prompts = []
+
+    class FakeAssessment:
+        async def ainvoke(self, messages):
+            return TutorAssessment()
+
+    class StreamingModel:
+        async def astream(self, messages):
+            prompts.append(messages[0].content)
+            yield AIMessageChunk(content="Phản hồi theo mode.")
+
+        def with_structured_output(self, schema, **kwargs):
+            return FakeAssessment()
+
+    class FakeEmbedding:
+        async def aembed_query(self, query):
+            return [0.0] * 768
+
+    class FakeResearcher:
+        async def research(self, **kwargs):
+            return ""
+
+    monkeypatch.setattr("education.tutor_graph.ProblemPerception.extract", fake_extract)
+    monkeypatch.setattr("education.tutor_graph.get_chat_model", lambda role: StreamingModel())
+    monkeypatch.setattr("education.tutor_graph.get_embedding_model", lambda: FakeEmbedding())
+    graph = build_tutor_graph(
+        MemoryRepository(),
+        _Storage(),
+        checkpointer=MemorySaver(),
+        research_service=FakeResearcher(),
+    )
+
+    concept = await graph.ainvoke(
+        {
+            "user_id": "student",
+            "session_id": "concept-mode",
+            "subject": "math",
+            "learning_mode": "concept",
+            "message": "Giải bài đạo hàm này giúp em",
+            "attachment_ids": [],
+            "conversation": [{"role": "user", "content": "Giải bài đạo hàm này giúp em"}],
+        },
+        {"configurable": {"thread_id": "student:concept-mode"}},
+    )
+    guided = await graph.ainvoke(
+        {
+            "user_id": "student",
+            "session_id": "guided-mode",
+            "subject": "math",
+            "learning_mode": "guided_problem",
+            "message": "Giải thích thật sâu khái niệm đạo hàm",
+            "attachment_ids": [],
+            "conversation": [
+                {"role": "user", "content": "Giải thích thật sâu khái niệm đạo hàm"}
+            ],
+        },
+        {"configurable": {"thread_id": "student:guided-mode"}},
+    )
+
+    assert concept["learning_plan"]["intent"] == "understand_concept"
+    assert guided["learning_plan"]["intent"] == "solve_problem"
+    assert "Mục tiêu của lượt này là giúp học sinh hiểu sâu" in prompts[0]
+    assert "Mức gợi ý cho phép" in prompts[1]

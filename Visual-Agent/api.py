@@ -35,15 +35,15 @@ from education.models import (
     AuthUser,
     ChatMessage,
     KnowledgeIngestionJob,
-    ReviewPatch,
+    LearningMode,
+    SUPPORTED_SUBJECTS,
     Subject,
+    is_supported_subject,
 )
 from education.curriculum import SKILL_BY_ID
 from education.learning_profile import summarize_learning_profile
-from education.exam_research import LearningPathSupervisor
 from education.recommendations import rank_recommendations
 from education.tutor_graph import build_tutor_graph, state_json
-from exam.jobs import enqueue_initial_sync
 from services.auth import authenticate_access_token, get_current_user, require_admin
 from services.content import ContentIngestionService
 from services.knowledge import KnowledgeFileError, read_knowledge_payload
@@ -108,6 +108,16 @@ async def _dispatch_knowledge_job(job_id: str) -> None:
 def _dbg(*args):
     if _DEBUG:
         print("[DBG]", *args, flush=True)
+
+
+def _require_supported_subject(subject: Subject | None, *, optional: bool = False) -> None:
+    if optional and subject is None:
+        return
+    if not is_supported_subject(subject):
+        raise HTTPException(
+            status_code=422,
+            detail="Hệ thống hiện chỉ hỗ trợ môn Toán và Vật lí.",
+        )
 
 
 # ── Startup / shutdown ─────────────────────────────────────────────────────────
@@ -184,10 +194,16 @@ class TutorRequest(BaseModel):
     attachment_ids: list[str] = Field(default_factory=list)
     knowledge_document_ids: list[str] = Field(default_factory=list, max_length=50)
     subject: Subject | None = None
+    learning_mode: LearningMode | None = None
 
 
-class ExamSyncRequest(BaseModel):
-    extract: bool = True
+class ChatSessionCreateRequest(BaseModel):
+    subject: Subject
+    learning_mode: LearningMode = LearningMode.GUIDED_PROBLEM
+
+
+class ChatSessionModeUpdateRequest(BaseModel):
+    learning_mode: LearningMode
 
 
 class ContentIngestRequest(BaseModel):
@@ -342,8 +358,25 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _chat_subjects(messages: list[ChatMessage]) -> set[Subject]:
+    subjects: set[Subject] = set()
+    for item in messages:
+        value = item.metadata.get("subject")
+        try:
+            subject = Subject(value) if value else Subject.UNKNOWN
+        except ValueError:
+            continue
+        if subject != Subject.UNKNOWN:
+            subjects.add(subject)
+    return subjects
+
+
 async def tutor_events(request: TutorRequest, user: AuthUser, tutor):
     """Yield transport-neutral public events for SSE and WebSocket clients."""
+    if request.subject is not None and not is_supported_subject(request.subject):
+        yield {"type": "error", "content": "Hệ thống hiện chỉ hỗ trợ môn Toán và Vật lí."}
+        yield {"type": "done"}
+        return
     try:
         uuid.UUID(request.session_id)
     except ValueError:
@@ -355,14 +388,70 @@ async def tutor_events(request: TutorRequest, user: AuthUser, tutor):
         "configurable": {"thread_id": f"{user.id}:{request.session_id}"},
     }
     try:
-        stored_history = await _REPOSITORY.get_chat_history(
-            user.id, request.session_id, limit=24
+        stored_history, stored_session = await asyncio.gather(
+            _REPOSITORY.get_chat_history(user.id, request.session_id, limit=24),
+            _REPOSITORY.get_chat_session(user.id, request.session_id),
         )
     except Exception as exc:
         print(f"[chat history read error] {exc}", flush=True)
         yield {"type": "error", "content": "Không thể tải lịch sử hội thoại"}
         yield {"type": "done"}
         return
+    stored_subjects = _chat_subjects(stored_history)
+    if stored_session is not None:
+        stored_subjects.add(stored_session.subject)
+    requested_subject = (
+        request.subject
+        if request.subject is not None and request.subject != Subject.UNKNOWN
+        else None
+    )
+    if len(stored_subjects) > 1:
+        yield {
+            "type": "error",
+            "content": (
+                "Phiên cũ đang chứa nhiều môn. Hãy tạo phiên mới cho môn đang chọn "
+                "để tránh trộn lịch sử học."
+            ),
+        }
+        yield {"type": "done"}
+        return
+    stored_subject = next(iter(stored_subjects), None)
+    if (
+        requested_subject is not None
+        and stored_subject is not None
+        and requested_subject != stored_subject
+    ):
+        yield {
+            "type": "error",
+            "content": (
+                f"Phiên này thuộc môn {stored_subject.value}; không thể dùng cho "
+                f"môn {requested_subject.value}. Hãy chuyển về đúng môn hoặc tạo phiên mới."
+            ),
+        }
+        yield {"type": "done"}
+        return
+    effective_subject = requested_subject or stored_subject
+    if effective_subject is not None and not is_supported_subject(effective_subject):
+        yield {"type": "error", "content": "Hệ thống hiện chỉ hỗ trợ môn Toán và Vật lí."}
+        yield {"type": "done"}
+        return
+    effective_mode = (
+        request.learning_mode
+        or (stored_session.learning_mode if stored_session is not None else None)
+    )
+    if (
+        stored_session is not None
+        and request.learning_mode is not None
+        and request.learning_mode != stored_session.learning_mode
+    ):
+        stored_session = await _REPOSITORY.update_chat_session_mode(
+            user.id, request.session_id, request.learning_mode
+        )
+        if stored_session is None:
+            yield {"type": "error", "content": "Không tìm thấy phiên chat."}
+            yield {"type": "done"}
+            return
+        effective_mode = stored_session.learning_mode
     checkpoint_has_conversation = False
     try:
         if hasattr(tutor, "aget_state"):
@@ -386,6 +475,8 @@ async def tutor_events(request: TutorRequest, user: AuthUser, tutor):
     graph_input = {
         "user_id": user.id,
         "session_id": request.session_id,
+        "subject": effective_subject.value if effective_subject else "unknown",
+        "learning_mode": effective_mode.value if effective_mode else None,
         "message": request.message,
         "attachment_ids": request.attachment_ids,
         "knowledge_document_ids": request.knowledge_document_ids,
@@ -397,6 +488,8 @@ async def tutor_events(request: TutorRequest, user: AuthUser, tutor):
         "visualization_router": "Đang xác định nhu cầu trực quan hóa",
         "visualization_tool": "Đang tạo animation minh họa",
         "retrieval": "Đang đối chiếu học liệu đã duyệt",
+        "supervisor": "Đang đánh giá mức hiểu biết và chọn lộ trình tiếp cận",
+        "research": "Đang tra cứu kiến thức và bài toán liên quan",
         "tutor": "Đang chuẩn bị gợi ý phù hợp",
         "assessment": "Đang đánh giá bài làm",
         "mastery": "Đang cập nhật tiến bộ",
@@ -421,7 +514,8 @@ async def tutor_events(request: TutorRequest, user: AuthUser, tutor):
                 content=visible_message,
                 metadata={
                     "attachment_ids": request.attachment_ids,
-                    "subject": request.subject.value if request.subject else None,
+                    "subject": effective_subject.value if effective_subject else None,
+                    "learning_mode": effective_mode.value if effective_mode else None,
                 },
             )
         )
@@ -466,6 +560,22 @@ async def tutor_events(request: TutorRequest, user: AuthUser, tutor):
                         "type": "problem_extracted",
                         "problem": state_json(values["problem"]),
                     }
+                if node in {"supervisor", "mastery"} and values.get("learning_plan"):
+                    public_plan = state_json(values["learning_plan"])
+                    yield {
+                        "type": "learning_plan",
+                        "plan": public_plan,
+                    }
+                    if node == "supervisor":
+                        yield {
+                            "type": "mode_selected",
+                            "learning_mode": (
+                                "concept"
+                                if isinstance(public_plan, dict)
+                                and public_plan.get("intent") == "understand_concept"
+                                else "guided_problem"
+                            ),
+                        }
                 if node == "visualization_tool" and values.get("visualization"):
                     visual = state_json(values["visualization"])
                     if visual.get("success"):
@@ -501,8 +611,11 @@ async def tutor_events(request: TutorRequest, user: AuthUser, tutor):
                             metadata={
                                 "event_type": event_type,
                                 "hint_level": response.get("hint_level", 0),
-                                "subject": request.subject.value
-                                if request.subject
+                                "subject": effective_subject.value
+                                if effective_subject
+                                else None,
+                                "learning_mode": effective_mode.value
+                                if effective_mode
                                 else None,
                                 "visualization": current_visualization,
                             },
@@ -648,6 +761,8 @@ async def stream_tutor(
 ):
     if not request.message.strip() and not request.attachment_ids:
         raise HTTPException(status_code=422, detail="Message or attachment is required")
+    if request.subject is not None:
+        _require_supported_subject(request.subject)
     _RATE_LIMITER.check(f"tutor:{user.id}")
     return StreamingResponse(
         tutor_event_stream(request, user, req.app.state.tutor),
@@ -660,6 +775,16 @@ async def stream_tutor(
 async def tutor_websocket(websocket: WebSocket):
     """Stream one tutor turn as JSON frames; auth is supplied in the start frame."""
     await websocket.accept()
+
+    async def send_terminal_error(content: str) -> None:
+        try:
+            await websocket.send_json({"type": "error", "content": content})
+            await websocket.send_json({"type": "done"})
+        except (RuntimeError, WebSocketDisconnect):
+            # The transport is already gone; the durable request/messages remain
+            # available through PostgreSQL history.
+            pass
+
     try:
         start = await websocket.receive_json()
         token = start.get("access_token") if isinstance(start, dict) else None
@@ -667,25 +792,28 @@ async def tutor_websocket(websocket: WebSocket):
         user = await authenticate_access_token(token)
         request = TutorRequest.model_validate(request_data)
         if not request.message.strip() and not request.attachment_ids:
-            await websocket.send_json(
-                {"type": "error", "content": "Message or attachment is required"}
-            )
-            await websocket.send_json({"type": "done"})
+            await send_terminal_error("Message or attachment is required")
             return
+        if request.subject is not None:
+            _require_supported_subject(request.subject)
         client_ip = websocket.client.host if websocket.client else "unknown"
         _RATE_LIMITER.check(f"ws-ip:{client_ip}")
         _RATE_LIMITER.check(f"tutor:{user.id}")
         async for event in tutor_events(request, user, websocket.app.state.tutor):
             await websocket.send_json(event)
-    except WebSocketDisconnect:
+    except WebSocketDisconnect as exc:
+        print(
+            f"[tutor websocket disconnect] code={exc.code} reason={exc.reason or '-'}",
+            flush=True,
+        )
         return
     except (HTTPException, ValidationError) as exc:
         detail = exc.detail if isinstance(exc, HTTPException) else "Invalid tutor request"
-        await websocket.send_json({"type": "error", "content": detail})
-        await websocket.send_json({"type": "done"})
-    except Exception:
-        await websocket.send_json({"type": "error", "content": "Tutor request failed"})
-        await websocket.send_json({"type": "done"})
+        print(f"[tutor websocket rejected] {type(exc).__name__}", flush=True)
+        await send_terminal_error(detail)
+    except Exception as exc:
+        print(f"[tutor websocket error] {type(exc).__name__}", flush=True)
+        await send_terminal_error("Tutor request failed")
     finally:
         try:
             await websocket.close()
@@ -695,10 +823,17 @@ async def tutor_websocket(websocket: WebSocket):
 
 @app.get("/health")
 async def health(req: Request):
+    chat_database_ready = True
+    if hasattr(_REPOSITORY, "healthcheck"):
+        try:
+            chat_database_ready = bool(await _REPOSITORY.healthcheck())
+        except Exception:
+            chat_database_ready = False
     return {
         "status": "ok",
         "memory": type(req.app.state.checkpointer).__name__,
         "chat_history": type(_REPOSITORY).__name__,
+        "chat_database_ready": chat_database_ready,
         "inference": "ollama-cloud" if is_ollama_cloud(_SETTINGS.ollama_base_url) else "ollama-compatible",
         "model": normalize_ollama_model(_SETTINGS.tutor_model, _SETTINGS.ollama_base_url),
         "visualization_model": normalize_ollama_model(
@@ -722,9 +857,17 @@ async def get_me(user: AuthUser = Depends(get_current_user)):
 
 
 @app.get("/api/me/mastery")
-async def get_my_mastery(user: AuthUser = Depends(get_current_user)):
+async def get_my_mastery(
+    subject: Subject | None = Query(default=None),
+    user: AuthUser = Depends(get_current_user),
+):
+    _require_supported_subject(subject, optional=True)
     records = [
-        item for item in await _REPOSITORY.get_mastery(user.id) if item.attempts > 0
+        item
+        for item in await _REPOSITORY.get_mastery(user.id)
+        if item.attempts > 0
+        and item.subject in SUPPORTED_SUBJECTS
+        and (subject is None or item.subject == subject)
     ]
     summary = summarize_learning_profile(records)
     return {
@@ -734,26 +877,19 @@ async def get_my_mastery(user: AuthUser = Depends(get_current_user)):
 
 
 @app.get("/api/me/recommendations")
-async def get_my_recommendations(user: AuthUser = Depends(get_current_user)):
-    mastery = await _REPOSITORY.get_mastery(user.id)
-    trends = await _REPOSITORY.get_exam_trends()
-    items = rank_recommendations(mastery, trends)
-    return {"items": [item.model_dump(mode="json") for item in items]}
-
-
-@app.get("/api/me/exam-plan/{subject}")
-async def get_my_exam_plan(
-    subject: Subject,
-    target_score: float | None = Query(default=None, ge=0.0, le=10.0),
+async def get_my_recommendations(
+    subject: Subject | None = Query(default=None),
     user: AuthUser = Depends(get_current_user),
 ):
-    if subject == Subject.UNKNOWN:
-        raise HTTPException(status_code=422, detail="A STEM subject is required")
-    _RATE_LIMITER.check(f"exam-plan:{user.id}")
-    plan = await LearningPathSupervisor(_REPOSITORY).build_plan(
-        user.id, subject, target_score=target_score
-    )
-    return plan.model_dump(mode="json")
+    _require_supported_subject(subject, optional=True)
+    mastery = [
+        item
+        for item in await _REPOSITORY.get_mastery(user.id)
+        if item.subject in SUPPORTED_SUBJECTS
+        and (subject is None or item.subject == subject)
+    ]
+    items = rank_recommendations(mastery)
+    return {"items": [item.model_dump(mode="json") for item in items]}
 
 
 @app.delete("/api/me", status_code=204)
@@ -763,22 +899,12 @@ async def delete_my_data(user: AuthUser = Depends(get_current_user)):
     return Response(status_code=204)
 
 
-@app.post("/api/admin/exam-sync", status_code=202)
-async def admin_exam_sync(
-    payload: ExamSyncRequest,
-    user: AuthUser = Depends(require_admin),
-):
-    result = await asyncio.to_thread(enqueue_initial_sync, extract=payload.extract)
-    return {"status": "queued" if isinstance(result, str) else "completed", "result": result}
-
-
 @app.post("/api/admin/content", status_code=201)
 async def admin_ingest_content(
     payload: ContentIngestRequest,
     user: AuthUser = Depends(require_admin),
 ):
-    if payload.subject == Subject.UNKNOWN:
-        raise HTTPException(status_code=422, detail="A STEM subject is required")
+    _require_supported_subject(payload.subject)
     try:
         document_id, chunks, embedding_status = await ContentIngestionService(
             _REPOSITORY
@@ -813,8 +939,7 @@ async def upload_knowledge(
     user: AuthUser = Depends(get_current_user),
 ):
     """Stage a private document and trigger asynchronous RAG ingestion."""
-    if subject == Subject.UNKNOWN:
-        raise HTTPException(status_code=422, detail="A STEM subject is required")
+    _require_supported_subject(subject)
     _RATE_LIMITER.check(f"knowledge-upload:{user.id}")
     try:
         data, filename, mime_type = await read_knowledge_payload(
@@ -897,8 +1022,7 @@ async def list_knowledge_jobs(
     limit: int = Query(default=20, ge=1, le=100),
     user: AuthUser = Depends(get_current_user),
 ):
-    if subject == Subject.UNKNOWN:
-        raise HTTPException(status_code=422, detail="A STEM subject is required")
+    _require_supported_subject(subject, optional=True)
     jobs = await _REPOSITORY.list_knowledge_jobs(user.id, subject, limit)
     return {"items": [item.model_dump(mode="json") for item in jobs]}
 
@@ -909,8 +1033,7 @@ async def list_knowledge_documents(
     limit: int = Query(default=50, ge=1, le=100),
     user: AuthUser = Depends(get_current_user),
 ):
-    if subject == Subject.UNKNOWN:
-        raise HTTPException(status_code=422, detail="A STEM subject is required")
+    _require_supported_subject(subject, optional=True)
     documents = await _REPOSITORY.list_knowledge_documents(user.id, subject, limit)
     return {"items": [item.model_dump(mode="json") for item in documents]}
 
@@ -953,34 +1076,45 @@ async def knowledge_uploaded_webhook(
     return {"accepted": True, "job_id": job.id, "status": job.status}
 
 
-@app.get("/api/admin/review-queue")
-async def admin_review_queue(
-    limit: int = 100,
-    user: AuthUser = Depends(require_admin),
-):
-    items = await _REPOSITORY.list_review_queue(min(max(limit, 1), 200))
-    return {"items": [item.model_dump(mode="json") for item in items]}
-
-
-@app.patch("/api/admin/review-queue/{question_id}")
-async def admin_patch_review(
-    question_id: str,
-    patch: ReviewPatch,
-    user: AuthUser = Depends(require_admin),
-):
-    item = await _REPOSITORY.patch_review(question_id, patch)
-    if not item:
-        raise HTTPException(status_code=404, detail="Question not found")
-    return item.model_dump(mode="json")
-
-
 @app.get("/api/chat/sessions")
 async def list_chat_sessions(
     limit: int = Query(default=50, ge=1, le=100),
+    subject: Subject | None = Query(default=None),
     user: AuthUser = Depends(get_current_user),
 ):
-    sessions = await _REPOSITORY.list_chat_sessions(user.id, limit)
+    _require_supported_subject(subject, optional=True)
+    sessions = await _REPOSITORY.list_chat_sessions(user.id, limit, subject)
     return {"items": [item.model_dump(mode="json") for item in sessions]}
+
+
+@app.post("/api/chat/sessions", status_code=201)
+async def create_chat_session(
+    request: ChatSessionCreateRequest,
+    user: AuthUser = Depends(get_current_user),
+):
+    _require_supported_subject(request.subject)
+    session = await _REPOSITORY.create_chat_session(
+        user.id, request.subject, request.learning_mode
+    )
+    return session.model_dump(mode="json")
+
+
+@app.patch("/api/chat/sessions/{session_id}")
+async def update_chat_session_mode(
+    session_id: str,
+    request: ChatSessionModeUpdateRequest,
+    user: AuthUser = Depends(get_current_user),
+):
+    try:
+        uuid.UUID(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="session_id must be a UUID") from exc
+    session = await _REPOSITORY.update_chat_session_mode(
+        user.id, session_id, request.learning_mode
+    )
+    if session is None:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    return session.model_dump(mode="json")
 
 
 @app.get("/api/history/{session_id}")
@@ -994,8 +1128,9 @@ async def get_history(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="session_id must be a UUID") from exc
     config = {"configurable": {"thread_id": f"{user.id}:{session_id}"}}
-    persistent_messages = await _REPOSITORY.get_chat_history(
-        user.id, session_id, limit=100
+    persistent_messages, stored_session = await asyncio.gather(
+        _REPOSITORY.get_chat_history(user.id, session_id, limit=100),
+        _REPOSITORY.get_chat_session(user.id, session_id),
     )
     values = {}
     try:
@@ -1021,10 +1156,22 @@ async def get_history(
     ]
     if not messages:
         messages = values.get("conversation", [])
+    subjects = _chat_subjects(persistent_messages)
     return {
         "session_id": session_id,
+        "subject": (
+            stored_session.subject.value
+            if stored_session is not None
+            else next(iter(subjects)).value if len(subjects) == 1 else None
+        ),
+        "learning_mode": (
+            stored_session.learning_mode.value
+            if stored_session is not None
+            else LearningMode.GUIDED_PROBLEM.value
+        ),
         "problem": values.get("problem"),
         "hint_level": values.get("hint_level", 0),
+        "learning_plan": values.get("learning_plan"),
         "last_response": values.get("tutor_response"),
         "messages": messages,
         "persistent": bool(persistent_messages),

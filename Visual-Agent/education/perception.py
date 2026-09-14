@@ -6,15 +6,13 @@ import re
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from education.curriculum import skills_for_subject
-from education.models import ProblemExtraction, Subject
+from education.models import ProblemExtraction, Subject, is_supported_subject
 from utils.model_factory import get_chat_model
 
 
 SUBJECT_KEYWORDS = {
     Subject.MATH: ("toán", "hàm", "đạo hàm", "tích phân", "xác suất", "phương trình", "tọa độ"),
     Subject.PHYSICS: ("vật lí", "vận tốc", "điện", "từ trường", "nhiệt", "hạt nhân", "áp suất"),
-    Subject.CHEMISTRY: ("hóa", "phản ứng", "mol", "ester", "polymer", "điện phân", "dung dịch"),
-    Subject.BIOLOGY: ("sinh học", "di truyền", "gen", "nhiễm sắc thể", "tiến hóa", "sinh thái", "tế bào"),
 }
 
 SKILL_KEYWORDS = {
@@ -28,16 +26,6 @@ SKILL_KEYWORDS = {
     "physics.electromagnetism": ("từ trường", "cảm ứng", "điện từ"),
     "physics.ac": ("xoay chiều", "rms", "hiệu dụng"),
     "physics.nuclear": ("hạt nhân", "phóng xạ"),
-    "chemistry.esters": ("ester", "lipid", "chất béo"),
-    "chemistry.carbohydrates": ("glucose", "saccharose", "tinh bột", "carbohydrate"),
-    "chemistry.amines": ("amine", "amino", "nitrogen", "nitơ"),
-    "chemistry.polymers": ("polymer", "trùng hợp", "vật liệu"),
-    "chemistry.electrochemistry": ("điện phân", "pin điện", "điện cực"),
-    "biology.genetics": ("di truyền", "gen", "nhiễm sắc thể"),
-    "biology.evolution": ("tiến hóa", "chọn lọc"),
-    "biology.ecology": ("sinh thái", "quần thể", "hệ sinh thái"),
-    "biology.cells": ("tế bào", "enzyme", "màng"),
-    "biology.biotechnology": ("công nghệ sinh học", "dna tái tổ hợp", "pcr"),
 }
 
 
@@ -104,8 +92,8 @@ class ProblemPerception:
             SystemMessage(
                 content=(
                     "Bạn là bộ đọc đề STEM lớp 12 Việt Nam. Chỉ trích xuất nội dung, "
-                    "không đưa lời giải. subject phải là math, physics, chemistry, "
-                    "biology hoặc unknown. confidence phản ánh độ chắc chắn của OCR."
+                    "không đưa lời giải. Hệ thống chỉ hỗ trợ Toán và Vật lí; subject phải "
+                    "là math, physics hoặc unknown. confidence phản ánh độ chắc chắn của OCR."
                 )
             ),
             HumanMessage(content=content),
@@ -115,6 +103,10 @@ class ProblemPerception:
                 ProblemExtraction, method="function_calling"
             )
             result = await structured.ainvoke(messages)
+            if not is_supported_subject(result.subject):
+                result.subject = Subject.UNKNOWN
+                result.skill_ids = []
+                result.confidence = min(result.confidence, 0.2)
             if not result.skill_ids:
                 result.skill_ids = infer_skills(result.problem_markdown, result.subject)
             return result

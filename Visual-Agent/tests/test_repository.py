@@ -1,47 +1,37 @@
+import sqlite3
+
 import pytest
 
-from education.models import ChatMessage, ExamQuestion, ExamSource, ReviewPatch, ReviewStatus, Subject
+from education.models import ChatMessage, LearningMode, Subject
 from services.repository import LocalRepository, MemoryRepository
 
 
 @pytest.mark.asyncio
-async def test_exam_sync_storage_is_idempotent_and_requires_review():
-    repository = MemoryRepository()
-    source = await repository.save_exam_source(
-        ExamSource(url="https://vqa.moet.gov.vn/x", publisher="MOET", exam_year=2026, subject=Subject.MATH)
+async def test_empty_chat_session_is_persisted_and_listed(tmp_path):
+    database = tmp_path / "chat.sqlite3"
+    repository = LocalRepository(str(database))
+    created = await repository.create_chat_session(
+        "user-a", Subject.MATH, LearningMode.CONCEPT
     )
-    artifact = {
-        "source_id": source.id,
-        "storage_path": "private/original.png",
-        "original_url": "https://vqa.moet.gov.vn/original.png",
-        "mime_type": "image/png",
-        "checksum": "abc",
-    }
-    first_artifact_id = await repository.save_exam_artifact(artifact)
-    second_artifact_id = await repository.save_exam_artifact(artifact)
-    assert first_artifact_id == second_artifact_id
-    assert len(repository.exam_artifacts) == 1
-    first = ExamQuestion(
-        source_id=source.id,
-        exam_year=2026,
-        subject=Subject.MATH,
-        question_number="1",
-        stem_markdown="Câu hỏi",
-        confidence=0.9,
+
+    restarted = LocalRepository(str(database))
+    sessions = await restarted.list_chat_sessions(
+        "user-a", subject=Subject.MATH
     )
-    await repository.save_exam_questions([first])
-    await repository.save_exam_questions([first.model_copy(update={"stem_markdown": "Câu hỏi đã OCR lại"})])
-    assert len(repository.exam_questions) == 1
-    pending = await repository.list_review_queue()
-    assert pending[0].review_status == ReviewStatus.PENDING
-    approved = await repository.patch_review(first.id, ReviewPatch(review_status=ReviewStatus.APPROVED))
-    assert approved.review_status == ReviewStatus.APPROVED
 
+    assert sessions[0].session_id == created.id
+    assert sessions[0].message_count == 0
+    assert sessions[0].title == "Phiên mới"
+    assert sessions[0].learning_mode == LearningMode.CONCEPT
 
-@pytest.mark.asyncio
-async def test_exam_trends_do_not_fabricate_templates_without_reviewed_questions():
-    repository = MemoryRepository()
-    assert await repository.get_exam_trends() == []
+    updated = await restarted.update_chat_session_mode(
+        "user-a", created.id, LearningMode.GUIDED_PROBLEM
+    )
+    persisted = await restarted.get_chat_session("user-a", created.id)
+    assert updated is not None
+    assert updated.learning_mode == LearningMode.GUIDED_PROBLEM
+    assert persisted is not None
+    assert persisted.learning_mode == LearningMode.GUIDED_PROBLEM
 
 
 @pytest.mark.asyncio
@@ -68,3 +58,65 @@ async def test_local_chat_history_survives_repository_restart(tmp_path):
     assert sessions[0].session_id == "session-a"
     assert sessions[0].title == "Cách làm đã sửa"
     assert await restarted.get_chat_history("user-b", "session-a") == []
+
+
+@pytest.mark.asyncio
+async def test_local_repository_migrates_legacy_sessions_to_default_mode(tmp_path):
+    database = tmp_path / "legacy-chat.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE tutoring_sessions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO tutoring_sessions VALUES (?, ?, ?, ?, ?)",
+            ("session-a", "user-a", "math", "2026-01-01", "2026-01-01"),
+        )
+
+    repository = LocalRepository(str(database))
+    session = await repository.get_chat_session("user-a", "session-a")
+
+    assert session is not None
+    assert session.learning_mode == LearningMode.GUIDED_PROBLEM
+
+
+@pytest.mark.asyncio
+async def test_chat_sessions_are_filtered_by_subject():
+    repository = MemoryRepository()
+    await repository.save_chat_message(
+        ChatMessage(
+            user_id="student",
+            session_id="math-session",
+            request_id="math-request",
+            role="user",
+            content="Đạo hàm là gì?",
+            metadata={"subject": "math"},
+        )
+    )
+    await repository.save_chat_message(
+        ChatMessage(
+            user_id="student",
+            session_id="physics-session",
+            request_id="physics-request",
+            role="user",
+            content="Định luật Newton",
+            metadata={"subject": "physics"},
+        )
+    )
+
+    math_sessions = await repository.list_chat_sessions(
+        "student", subject=Subject.MATH
+    )
+    physics_sessions = await repository.list_chat_sessions(
+        "student", subject=Subject.PHYSICS
+    )
+
+    assert [item.session_id for item in math_sessions] == ["math-session"]
+    assert [item.session_id for item in physics_sessions] == ["physics-session"]

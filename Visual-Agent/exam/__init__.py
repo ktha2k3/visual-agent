@@ -1,2 +1,1 @@
-"""Whitelisted exam ingestion and review pipeline."""
-
+"""Exam ingestion was removed; this package remains only as a migration placeholder."""

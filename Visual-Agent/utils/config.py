@@ -43,15 +43,14 @@ class Settings:
     supabase_publishable_key: str
     supabase_service_role_key: str
     supabase_storage_bucket: str
-    supabase_exam_bucket: str
     auth_required: bool
     admin_emails: tuple[str, ...]
     cors_origins: tuple[str, ...]
     upload_max_bytes: int
     upload_retention_days: int
-    source_hosts: tuple[str, ...]
     debug_stream: bool
     chat_database_path: str
+    database_url: str
     app_timezone: str
     knowledge_webhook_secret: str
     visualization_artifact_dir: str
@@ -100,7 +99,6 @@ def get_settings() -> Settings:
         ),
         supabase_service_role_key=os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
         supabase_storage_bucket=os.getenv("SUPABASE_STORAGE_BUCKET", "uploads"),
-        supabase_exam_bucket=os.getenv("SUPABASE_EXAM_BUCKET", "exam-artifacts"),
         auth_required=_as_bool(os.getenv("AUTH_REQUIRED"), default=False),
         admin_emails=tuple(
             email.lower() for email in _csv(os.getenv("ADMIN_EMAILS"))
@@ -111,20 +109,9 @@ def get_settings() -> Settings:
         ),
         upload_max_bytes=int(os.getenv("UPLOAD_MAX_BYTES", str(25 * 1024 * 1024))),
         upload_retention_days=int(os.getenv("UPLOAD_RETENTION_DAYS", "30")),
-        source_hosts=_csv(
-            os.getenv("EXAM_SOURCE_HOSTS"),
-            (
-                "moet.gov.vn",
-                "www.moet.gov.vn",
-                "vqa.moet.gov.vn",
-                "baochinhphu.vn",
-                "bcp.cdnchinhphu.vn",
-                "xaydungchinhsach.chinhphu.vn",
-                "xdcs.cdnchinhphu.vn",
-            ),
-        ),
         debug_stream=_as_bool(os.getenv("DEBUG_STREAM"), default=False),
         chat_database_path=os.getenv("CHAT_DATABASE_PATH", "data/chat_history.sqlite3"),
+        database_url=os.getenv("DATABASE_URL", "").strip(),
         app_timezone=os.getenv("APP_TIMEZONE", "Asia/Ho_Chi_Minh"),
         knowledge_webhook_secret=os.getenv("KNOWLEDGE_WEBHOOK_SECRET", ""),
         visualization_artifact_dir=os.getenv(

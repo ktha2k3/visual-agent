@@ -10,5 +10,11 @@ __pycache__/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+assets/knowledge-uploads/
+data/logs/
+data/visualizations/
+data/*.sqlite3*
+uploads/
+*.mp4
 README.md
 poetry.lock
