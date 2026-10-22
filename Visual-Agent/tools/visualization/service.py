@@ -50,6 +50,7 @@ class StemVisualizationService:
         self.renderer = renderer or ManimRenderer(
             quality=self.settings.visualization_quality,
             timeout=self.settings.visualization_render_timeout,
+            renderer=self.settings.visualization_renderer,
         )
         self.store = store or VisualizationArtifactStore(
             self.settings.visualization_artifact_dir
@@ -168,6 +169,7 @@ class StemVisualizationService:
                         text_font=getattr(
                             self.renderer, "preferred_text_font", None
                         ),
+                        renderer=getattr(self.renderer, "renderer", "cairo"),
                     ),
                 )
             )
@@ -289,6 +291,8 @@ class StemVisualizationService:
                     await self.provider.text(
                         system=MANIM_COMPATIBILITY_RULES + REPAIR_SYSTEM,
                         prompt=(
+                            f"Runtime renderer: {getattr(self.renderer, 'renderer', 'cairo')}. "
+                            "Use APIs compatible with this renderer.\n"
                             f"LỖI CẦN SỬA:\n{failure}\n\n"
                             f"SCENE CONTRACT:\n{plan.model_dump_json(indent=2)}\n\n"
                             f"MÃ HIỆN TẠI:\n```python\n{code}\n```"
@@ -319,6 +323,7 @@ class StemVisualizationService:
         *,
         latex_available: bool,
         text_font: str | None,
+        renderer: str = "cairo",
     ) -> str:
         latex_note = (
             "LaTeX có sẵn: dùng MathTex cho công thức."
@@ -333,7 +338,7 @@ class StemVisualizationService:
         return (
             "Tạo một animation ngắn 20-45 giây từ hai artifact sau. Công thức và "
             "quan hệ phải nhìn thấy được qua chuyển động, không chỉ là slide chữ.\n"
-            f"RUNTIME: {latex_note} {font_note}\n\n"
+            f"RUNTIME: Manim renderer={renderer}; use compatible APIs. {latex_note} {font_note}\n\n"
             f"CONCEPT PACKET:\n{analysis.model_dump_json(indent=2)}\n\n"
             f"SCENE CONTRACT:\n{plan.model_dump_json(indent=2)}"
         )

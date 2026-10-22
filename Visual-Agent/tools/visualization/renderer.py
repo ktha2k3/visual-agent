@@ -50,11 +50,14 @@ def _resource_limits() -> None:
 
 
 class ManimRenderer:
-    def __init__(self, *, quality: str = "l", timeout: float = 300):
+    def __init__(self, *, quality: str = "l", timeout: float = 5, renderer: str = "cairo"):
         if not _QUALITY.fullmatch(quality):
             raise ValueError(f"Invalid Manim quality: {quality!r}")
         self.quality = quality
         self.timeout = timeout
+        if renderer not in {"cairo", "opengl"}:
+            raise ValueError(f"Invalid Manim renderer: {renderer!r}")
+        self.renderer = renderer
 
     def preflight(self) -> None:
         if importlib.util.find_spec("manim") is None and not shutil.which("manim"):
@@ -97,6 +100,9 @@ class ManimRenderer:
             executable = [shutil.which("manim") or "manim"]
         return executable + [
             f"-q{self.quality}",
+            "--renderer",
+            self.renderer,
+            "--write_to_movie",
             "--media_dir",
             str(media_dir),
             "--progress_bar",

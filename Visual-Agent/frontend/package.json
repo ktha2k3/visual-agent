@@ -16,7 +16,8 @@
     "react-markdown": "^8.0.7",
     "rehype-katex": "^6.0.3",
     "remark-gfm": "^3.0.1",
-    "remark-math": "^5.1.1"
+    "remark-math": "^5.1.1",
+    "three": "^0.186.1"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.1.0",

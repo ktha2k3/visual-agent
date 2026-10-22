@@ -7,10 +7,10 @@ Visual-Agent là trợ giảng tự học đa phương thức cho Toán và Vậ
 - React/Vite: đăng nhập magic link, workspace học, hint ladder, nguồn, mastery và upload học liệu riêng.
 - FastAPI/SSE: API xác thực, upload private và event học tập; không phát chain-of-thought.
 - LangGraph 1.x: `perception → visualization decision/tool → retrieval → supervisor → research → tutor → assessment → mastery`.
-- Math-To-Manim tool: ưu tiên tạo animation cho câu hỏi khái niệm, công thức, định luật và hiện tượng Toán/Vật lí; scene được kiểm tra AST, render thật và tự sửa có giới hạn.
+- Minh hoạ chat: model phối hợp đối tượng, quan hệ và biểu thức thành cảnh SVG 2D hoặc Three.js 3D, chạy song song với lời giải; xem [GENERAL-SCENES.md](GENERAL-SCENES.md). Manim là tool riêng cho video.
 - Supervisor: đánh giá mức hiểu biết từ bằng chứng hội thoại/mastery của đúng môn và tạo hướng tiếp cận nền tảng → vận dụng → nâng cao.
 - Research Agent: nhận lệnh từ Supervisor để tra cứu kiến thức, phương pháp và dạng bài cơ bản → trung bình → nâng cao làm ngữ cảnh cho Tutor.
-- Ollama Cloud trực tiếp qua `https://ollama.com/v1`: cấu hình riêng tutor, vision và research.
+- River DeepSeek qua `https://api.river.ai/v1` cho tutor và sinh dữ liệu minh hoạ; Ollama Cloud giữ Gemma cho mô tả ảnh, GPT-OSS cho research.
 - Supabase: Auth/JWKS, PostgreSQL, pgvector, private Storage và RLS theo `auth.uid()`.
 - Redis Stack: checkpoint LangGraph ngắn hạn, hàng đợi RQ và scheduler dọn upload hết hạn.
 
@@ -18,7 +18,7 @@ Research Agent nằm trong Tutor Graph cho cả yêu cầu tìm cách giải và
 
 ## Chạy local
 
-Yêu cầu Python 3.11–3.12, Node.js 22, Ollama Cloud API key và Manim CE 0.19+; FFmpeg/LaTeX được khuyến nghị và đã có trong Docker image. Khi local chưa có LaTeX, code generator dùng `Text` cho công thức để vẫn render được. Khi chạy trực tiếp không qua Docker, PostgreSQL/Redis có thể bỏ qua để dùng fallback local. Docker development đã cấu hình sẵn PostgreSQL và Redis Stack.
+Yêu cầu Python 3.11–3.12, Node.js 22, River API key, Ollama Cloud API key và Manim CE 0.19+; FFmpeg/LaTeX được khuyến nghị và đã có trong Docker image. Khi local chưa có LaTeX, code generator dùng `Text` cho công thức để vẫn render được. Khi chạy trực tiếp không qua Docker, PostgreSQL/Redis có thể bỏ qua để dùng fallback local. Docker development đã cấu hình sẵn PostgreSQL và Redis Stack.
 
 ```powershell
 Copy-Item .env.example .env
@@ -38,9 +38,9 @@ npm run dev
 
 Khi chưa cấu hình Supabase và `AUTH_REQUIRED=false`, API dùng một tài khoản dev cục bộ. Không dùng chế độ này trên môi trường public.
 
-Khi gọi trực tiếp Ollama Cloud, dùng model tag `gemma4:31b`, `gpt-oss:120b` — không thêm hậu tố `-cloud`. Hậu tố đó chỉ dành cho đường chạy qua daemon Ollama local đã đăng nhập. Chat/vision tiếp tục dùng Cloud; embeddings dùng `nomic-embed-text` 768 chiều qua Ollama local tại `http://127.0.0.1:11434/v1`. Nếu daemon local tạm unavailable, ingestion vẫn lưu chunk và tự fallback sang lexical retrieval.
+`RIVER_BASE_URL=https://api.river.ai/v1` và `RIVER_API_KEY` dành cho hội thoại, đánh giá và minh hoạ. `LLM_MODEL_NAME` mặc định là `deepseek-ai/DeepSeek-V4.1-Flash`; `TUTOR_MODEL` và `VISUALIZATION_MODEL` có thể ghi đè tên model tại River. Thiếu River key sẽ báo lỗi cấu hình, không tự chuyển sang Gemma/GPT.
 
-Visualization dùng `VISUALIZATION_MODEL` (mặc định `OLLAMA_MODEL=gemma4:31b-cloud`). Model factory tự bỏ hậu tố `-cloud` khi gọi trực tiếp `https://ollama.com/v1`; credential chỉ đọc từ `OLLAMA_API_KEY`. Artifact được lưu persistent dưới `VISUALIZATION_ARTIFACT_DIR`, cache theo `normalized_question + subject + model + VISUALIZATION_VERSION`, và retry tối đa `MAX_RENDER_RETRIES`.
+`VISION_MODEL=gemma4:31b` chỉ đọc/mô tả ảnh; `RESEARCH_MODEL=gpt-oss:120b` chỉ research. Hai vai trò này dùng `OLLAMA_BASE_URL` và `OLLAMA_API_KEY`. Model factory tự bỏ hậu tố `-cloud` khi gọi trực tiếp `https://ollama.com/v1`. Embeddings dùng `nomic-embed-text` 768 chiều qua endpoint `EMBEDDING_BASE_URL` riêng; nếu daemon local tạm unavailable, ingestion vẫn lưu chunk và tự fallback sang lexical retrieval. Minh hoạ chat dùng scene compiler trong [GENERAL-SCENES.md](GENERAL-SCENES.md); video Manim vẫn có artifact và giới hạn retry riêng.
 
 ## Thiết lập Supabase
 
@@ -122,13 +122,16 @@ Image development đã chứa pytest, vì vậy có thể test đúng môi trư�
 
 Các test hiện có bao phủ công thức mastery/recommendation, routing và grounding của Research Agent, MIME/giải mã ảnh, ingestion idempotent, validators STEM, nhánh clarification, API dev-auth, visualization routing, structured planner, AST gate, render repair, cache, ownership và text fallback.
 
-## Luồng Math-To-Manim
+## Minh hoạ chat và tool video Manim
+
+Chat mặc định dùng đề hiện hành, yêu cầu và ngữ cảnh để lập JSON cảnh tổng quát gồm objects, relations, parameters và biểu thức chuyển động. Bộ dựng hình kiểm tra dữ liệu rồi hiển thị SVG 2D hoặc Three.js 3D, không giới hạn vào bốn chủ đề có sẵn. Minh hoạ không chặn lời giải; kết quả về muộn được lưu vào cùng tin nhắn. Xem [GENERAL-SCENES.md](GENERAL-SCENES.md).
+
+Luồng dưới đây chỉ dành cho tool video gọi trực tiếp, không phải luồng chat mặc định.
 
 Thiết kế artifact chain, AST gate và bounded render-repair được tích hợp theo kiến trúc của [HarleyCoops/Math-To-Manim](https://github.com/HarleyCoops/Math-To-Manim) (MIT), nhưng dùng trực tiếp Tutor Graph, model factory và API ownership của Visual-Agent thay vì nhúng các silo CLI/MCP của repository gốc.
 
 ```text
-Câu hỏi
-  → education/tutor_graph.py: visualization_router
+Lời gọi tool video trực tiếp
   → tools/visualization/tool.py: visualize_stem_concept
   → tools/visualization/provider.py: Ollama Cloud / Gemma 4
   → tools/visualization/service.py: ConceptAnalysis + VisualizationPlan
@@ -147,14 +150,14 @@ result = await visualize_stem_concept(
 )
 ```
 
-Nếu planning, validation hoặc render thất bại, tool trả `success=false`; Tutor Graph vẫn chạy retrieval/tutor và trả giải thích văn bản thay vì làm hỏng phiên chat.
+Nếu planning, validation hoặc render thất bại, tool video trả `success=false`. Chat mặc định dùng mẫu cố định và báo rõ failed/unsupported khi không có minh hoạ phù hợp.
 
 ## Cấu trúc mới
 
 ```text
 education/              domain model, curriculum, Tutor Graph, mastery, validators
 services/               auth, repository, private storage
-tools/visualization/     analyzer, planner, Manim codegen, validator, renderer, cache
+tools/visualization/     JSON templates, independent stream; standalone Manim tool
 supabase/migrations/    schema, pgvector, RLS và taxonomy seed
 tests/                  test backend
 frontend/src/           workspace học sinh và admin review

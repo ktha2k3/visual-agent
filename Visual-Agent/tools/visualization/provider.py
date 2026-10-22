@@ -26,7 +26,11 @@ class LLMProvider(ABC):
 
 
 class OllamaProvider(LLMProvider):
-    """Ollama Cloud through its OpenAI-compatible API."""
+    """Configured visualization model through its OpenAI-compatible API.
+
+    The legacy class name remains for existing callers; endpoint and credentials
+    are selected by model_factory (River for visualization).
+    """
 
     def __init__(self, model=None):
         self.model = model or get_chat_model("visualization", temperature=0.1)
@@ -82,7 +86,7 @@ class OllamaProvider(LLMProvider):
             )
             return schema.model_validate(result)
         except Exception:
-            # Some Ollama-compatible deployments do not implement tool calling.
+            # Some OpenAI-compatible deployments do not implement tool calling.
             # JSON-schema prompting keeps the provider functional without changing
             # any downstream pipeline contracts.
             fallback = await self.model.ainvoke(

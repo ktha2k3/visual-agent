@@ -29,6 +29,8 @@ def _csv(value: str | None, default: tuple[str, ...] = ()) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class Settings:
+    river_base_url: str
+    river_api_key: str
     ollama_base_url: str
     ollama_api_key: str
     tutor_model: str
@@ -56,6 +58,7 @@ class Settings:
     visualization_artifact_dir: str
     visualization_version: str
     visualization_quality: str
+    visualization_renderer: str
     visualization_render_timeout: float
     visualization_max_render_retries: int
     visualization_max_concurrency: int
@@ -75,19 +78,21 @@ def get_settings() -> Settings:
     from utils.ollama import get_ollama_base_url
 
     ollama_base_url = get_ollama_base_url()
-    default_model = os.getenv("MODEL_NAME", "gemma4:31b")
+    default_model = os.getenv("LLM_MODEL_NAME", "deepseek-ai/DeepSeek-V4.1-Flash")
     return Settings(
+        river_base_url=os.getenv("RIVER_BASE_URL", "https://api.river.ai/v1").strip().rstrip("/"),
+        river_api_key=os.getenv("RIVER_API_KEY", "").strip(),
         ollama_base_url=ollama_base_url,
         ollama_api_key=os.getenv("OLLAMA_API_KEY", ""),
         tutor_model=os.getenv("TUTOR_MODEL", default_model),
-        vision_model=os.getenv("VISION_MODEL", default_model),
+        vision_model=os.getenv("VISION_MODEL", os.getenv("MODEL_NAME", "gemma4:31b")),
         research_model=os.getenv(
             "RESEARCH_MODEL",
             os.getenv("MODEL_RESEARCH_NAME", "gpt-oss:120b"),
         ),
         visualization_model=os.getenv(
             "VISUALIZATION_MODEL",
-            os.getenv("OLLAMA_MODEL", "gemma4:31b-cloud"),
+            default_model,
         ),
         embedding_model=os.getenv("EMBEDDING_MODEL", "nomic-embed-text"),
         embedding_base_url=os.getenv("EMBEDDING_BASE_URL", "").strip(),
@@ -119,8 +124,9 @@ def get_settings() -> Settings:
         ),
         visualization_version=os.getenv("VISUALIZATION_VERSION", "stem-v1"),
         visualization_quality=os.getenv("VISUALIZATION_QUALITY", "l"),
+        visualization_renderer=os.getenv("VISUALIZATION_RENDERER", "cairo"),
         visualization_render_timeout=float(
-            os.getenv("VISUALIZATION_RENDER_TIMEOUT", "300")
+            os.getenv("VISUALIZATION_RENDER_TIMEOUT", "5")
         ),
         visualization_max_render_retries=max(
             0, int(os.getenv("MAX_RENDER_RETRIES", "3"))

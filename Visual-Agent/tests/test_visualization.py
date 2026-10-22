@@ -245,6 +245,29 @@ async def test_validation_failure_is_repaired_before_render(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_invalid_updater_is_repaired_without_rendering_broken_scene(tmp_path):
+    invalid = VALID_SCENE.replace(
+        "self.play(Create(circle))",
+        "circle.add_updater(lambda: None)\n        self.play(Create(circle))",
+    )
+    provider = FakeProvider(codes=[invalid, VALID_SCENE])
+    renderer = FakeRenderer()
+    result = await service(
+        tmp_path, provider=provider, renderer=renderer, retries=1
+    ).visualize(question="Giải thích con lắc", subject="physics", user_id="student")
+    assert result.success
+    assert result.attempts == 2
+    assert renderer.calls == 1
+    import json
+
+    first_validation = json.loads(
+        (tmp_path / result.artifact_id / "validation-1.json").read_text()
+    )
+    assert not first_validation["valid"]
+    assert "add_updater" in first_validation["errors"][0]
+
+
+@pytest.mark.asyncio
 async def test_render_failure_triggers_bounded_self_repair(tmp_path):
     provider = FakeProvider(codes=[VALID_SCENE, VALID_SCENE])
     renderer = FakeRenderer(failures=1)

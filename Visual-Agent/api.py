@@ -55,6 +55,7 @@ from services.knowledge_ingestion import (
 from services.repository import get_repository
 from services.storage import AssetStorage
 from tools.visualization.artifacts import VisualizationArtifactStore
+from tools.visualization.streaming import illustration_stream
 from utils.config import get_settings
 from utils.ollama import is_ollama_cloud, normalize_ollama_model
 
@@ -473,6 +474,7 @@ async def tutor_events(request: TutorRequest, user: AuthUser, tutor):
             if item.request_id != str(request.request_id)
         ] + conversation_input
     graph_input = {
+        "visualization_external": True,
         "user_id": user.id,
         "session_id": request.session_id,
         "subject": effective_subject.value if effective_subject else "unknown",
@@ -495,6 +497,9 @@ async def tutor_events(request: TutorRequest, user: AuthUser, tutor):
         "mastery": "Đang cập nhật tiến bộ",
     }
     visualization_progress_labels = {
+        "scene_composition": "Đang dựng cảnh minh hoạ theo đề bài",
+        "scene_validation": "Đang kiểm tra dữ kiện và quan hệ trong hình",
+        "template_selection": "Đang chọn mẫu minh hoạ phù hợp",
         "cache_hit": "Đang dùng lại animation đã tạo",
         "concept_analysis": "Đang phân tích khái niệm và công thức",
         "visualization_planning": "Đang thiết kế chuyển động trực quan",
@@ -504,6 +509,7 @@ async def tutor_events(request: TutorRequest, user: AuthUser, tutor):
         "completed": "Animation đã sẵn sàng",
     }
     current_visualization: dict | None = None
+    saved_response = None
     try:
         await _REPOSITORY.save_chat_message(
             ChatMessage(
@@ -519,11 +525,7 @@ async def tutor_events(request: TutorRequest, user: AuthUser, tutor):
                 },
             )
         )
-        async for raw in tutor.astream(
-            graph_input,
-            config=config,
-            stream_mode=["custom", "updates"],
-        ):
+        async for raw in illustration_stream(tutor, graph_input, config):
             if isinstance(raw, tuple) and len(raw) == 2 and isinstance(raw[0], str):
                 mode, payload = raw
             elif isinstance(raw, dict):
@@ -544,6 +546,7 @@ async def tutor_events(request: TutorRequest, user: AuthUser, tutor):
                     yield {
                         "type": "stage",
                         "stage": f"visualization:{progress_stage}",
+                        "status": "completed" if progress_stage in {"completed", "cache_hit"} else "running",
                         "label": visualization_progress_labels.get(
                             progress_stage, "Đang xử lý animation"
                         ),
@@ -554,7 +557,8 @@ async def tutor_events(request: TutorRequest, user: AuthUser, tutor):
             for node, values in payload.items():
                 if node not in stage_labels or not isinstance(values, dict):
                     continue
-                yield {"type": "stage", "stage": node, "label": stage_labels[node]}
+                if node != "visualization_tool":
+                    yield {"type": "stage", "stage": node, "label": stage_labels[node], "status": "completed"}
                 if node == "perception" and values.get("problem"):
                     yield {
                         "type": "problem_extracted",
@@ -578,7 +582,7 @@ async def tutor_events(request: TutorRequest, user: AuthUser, tutor):
                         }
                 if node == "visualization_tool" and values.get("visualization"):
                     visual = state_json(values["visualization"])
-                    if visual.get("success"):
+                    if isinstance(visual, dict):
                         current_visualization = {
                             key: visual.get(key)
                             for key in (
@@ -593,13 +597,21 @@ async def tutor_events(request: TutorRequest, user: AuthUser, tutor):
                                 "scene_url",
                                 "cached",
                                 "attempts",
+                                "status",
+                                "scene_data",
+                                "diagnostic_id",
+                                "error",
                             )
                         }
                         yield {"type": "visualization", **current_visualization}
+                        yield {"type": "stage", "stage": "visualization:result",
+                               "status": visual.get("status") or ("completed" if visual.get("success") else "failed"),
+                               "label": "Minh hoạ đã sẵn sàng" if visual.get("success") else visual.get("error", "Minh hoạ không khả dụng")}
                 response = values.get("tutor_response")
                 # Assessment may return the same response with evidence attached.
                 # Only student-facing nodes are allowed to emit chat messages.
                 if response and node in {"tutor", "clarification"}:
+                    saved_response = response
                     event_type = "hint" if response.get("feedback_type") in {"guidance", "clarification"} else "feedback"
                     await _REPOSITORY.save_chat_message(
                         ChatMessage(
@@ -634,6 +646,17 @@ async def tutor_events(request: TutorRequest, user: AuthUser, tutor):
     except Exception as exc:
         print(f"[tutor stream error] {exc}", flush=True)
         yield {"type": "error", "content": "Tutor request failed"}
+    if saved_response and current_visualization:
+        # A late illustration updates the same request's assistant row.
+        await _REPOSITORY.save_chat_message(ChatMessage(
+            user_id=user.id, session_id=request.session_id, request_id=str(request.request_id),
+            role="assistant", content=str(saved_response.get("message", "")).strip(),
+            metadata={"visualization": current_visualization,
+                      "event_type": "hint" if saved_response.get("feedback_type") in {"guidance", "clarification"} else "feedback",
+                      "hint_level": saved_response.get("hint_level", 0),
+                      "subject": effective_subject.value if effective_subject else None,
+                      "learning_mode": effective_mode.value if effective_mode else None},
+        ))
     yield {"type": "done"}
 
 

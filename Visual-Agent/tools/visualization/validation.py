@@ -96,6 +96,90 @@ def _static_string(node: ast.expr, constants: dict[str, str]) -> str | None:
     return None
 
 
+def _updater_signature_errors(tree: ast.AST) -> list[str]:
+    """Check statically resolvable callbacks without executing generated code."""
+    errors: list[str] = []
+
+    class CheckScope(ast.NodeVisitor):
+        def __init__(self):
+            self.scopes: list[dict[str, ast.AST | None]] = []
+
+        def visit_Module(self, node):
+            self.visit_scope(node)
+
+        def visit_FunctionDef(self, node):
+            self.visit_scope(node)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_scope(self, node):
+            bindings: dict[str, ast.AST | None] = {}
+
+            class Collect(ast.NodeVisitor):
+                def visit_FunctionDef(self, child):
+                    bindings[child.name] = child
+
+                visit_AsyncFunctionDef = visit_FunctionDef
+
+                def visit_ClassDef(self, child):
+                    bindings[child.name] = None
+
+                def visit_Name(self, child):
+                    if isinstance(child.ctx, ast.Store):
+                        bindings[child.id] = None
+
+            collector = Collect()
+            for child in node.body:
+                collector.visit(child)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for arg in ast.walk(node.args):
+                    if isinstance(arg, ast.arg):
+                        bindings[arg.arg] = None
+            self.scopes.append(bindings)
+            for child in node.body:
+                self.visit(child)
+            self.scopes.pop()
+
+        def visit_Call(self, node):
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "add_updater":
+                callback = node.args[0] if node.args else next(
+                    (kw.value for kw in node.keywords if kw.arg == "update_function"), None
+                )
+                definition = callback
+                if isinstance(callback, ast.Name):
+                    definition = None
+                    for scope in reversed(self.scopes):
+                        if callback.id in scope:
+                            definition = scope[callback.id]
+                            break
+                if isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    args = definition.args
+                    positional = args.posonlyargs + args.args
+                    names = {arg.arg for arg in positional + args.kwonlyargs}
+                    names.update(arg.arg for arg in (args.vararg, args.kwarg) if arg)
+                    # Manim selects updater(mobject, dt) when 'dt' is in
+                    # inspect.signature; otherwise it calls updater(mobject).
+                    supplied = 2 if "dt" in names else 1
+                    required = len(positional) - len(args.defaults)
+                    required_keywords = any(default is None for default in args.kw_defaults)
+                    if (
+                        isinstance(definition, ast.AsyncFunctionDef)
+                        or required > supplied
+                        or (args.vararg is None and supplied > len(positional))
+                        or required_keywords
+                    ):
+                        errors.append(
+                            f"add_updater callback at line {node.lineno} cannot accept "
+                            f"Manim's {supplied} positional argument(s). Use a synchronous "
+                            "def update(mobject) or def update(mobject, dt); "
+                            "do not require extra arguments or keyword-only dt."
+                        )
+            self.generic_visit(node)
+
+    CheckScope().visit(tree)
+    return errors
+
+
 def validate_manim_code(
     code: str, *, required_text_font: str | None = None
 ) -> ValidationReport:
@@ -107,6 +191,7 @@ def validate_manim_code(
     except (SyntaxError, ValueError) as exc:
         return ValidationReport(valid=False, errors=[f"Python syntax: {exc}"])
 
+    errors.extend(_updater_signature_errors(tree))
     imported_manim = False
     scene_classes: list[str] = []
     has_play = False

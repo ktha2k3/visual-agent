@@ -1,0 +1,56 @@
+[
+  {
+    "title": "Hình học: trung điểm và đường tròn",
+    "viewport": [-1, -2, 7, 5],
+    "objects": [
+      {"id":"A","kind":"point","points":[[0,0]],"label":"A"},
+      {"id":"B","kind":"point","points":[[6,0]],"label":"B"},
+      {"id":"C","kind":"point","points":[[2,4]],"label":"C"},
+      {"id":"triangle","kind":"polygon","points":[["A_x","A_y"],["B_x","B_y"],["C_x","C_y"]]},
+      {"id":"M","kind":"point","label":"M"},
+      {"id":"median","kind":"segment","points":[["C_x","C_y"],["M_x","M_y"]],"color":"#dc2626"},
+      {"id":"circle","kind":"circle","points":[[3,1]],"radius":1.2,"color":"#16a34a"}
+    ],
+    "relations":[{"target":"M","kind":"midpoint","sources":["A","B"]}],
+    "assumptions":["Ví dụ hình học; M được tính từ hai đầu A và B."]
+  },
+  {
+    "title":"Tia sáng qua thấu kính hội tụ",
+    "viewport":[-5,-3,5,3],
+    "objects":[
+      {"id":"axis","kind":"line","points":[[-5,0],[5,0]],"color":"#64748b"},
+      {"id":"lens","kind":"ellipse","points":[[0,0]],"size":[0.18,2,1],"color":"#0891b2","fill":true,"opacity":0.4},
+      {"id":"incident","kind":"arrow","points":[[-4,1.4],[0,1.4]],"color":"#dc2626"},
+      {"id":"refracted","kind":"arrow","points":[[0,1.4],[4,-1.4]],"color":"#dc2626"},
+      {"id":"focus","kind":"point","points":[[2,0]],"label":"F"},
+      {"id":"note","kind":"text","points":[[-4,-2]],"label":"Tia song song trục chính đi qua tiêu điểm F"}
+    ],
+    "assumptions":["Mô hình thấu kính mỏng, tia cận trục; hình không theo tỉ lệ thiết bị thật."]
+  },
+  {
+    "title":"Vật ném xiên: vị trí và vectơ vận tốc",
+    "viewport":[-1,-1,7,4],
+    "duration":0.8,
+    "parameters":[{"name":"v","value":8,"unit":"m/s"},{"name":"a","value":0.6,"unit":"rad"},{"name":"g","value":9.81,"unit":"m/s²"}],
+    "objects":[
+      {"id":"ground","kind":"segment","points":[[-1,0],[7,0]],"color":"#64748b"},
+      {"id":"trajectory","kind":"curve","x":"v*cos(a)*u","y":"v*sin(a)*u-g*u^2/2","u_min":0,"u_max":0.8,"color":"#94a3b8"},
+      {"id":"ball","kind":"point","points":[["v*cos(a)*t","v*sin(a)*t-g*t^2/2"]],"radius":0.12,"label":"Vật"},
+      {"id":"velocity","kind":"arrow","points":[["ball_x","ball_y"],["ball_x+v*cos(a)/5","ball_y+(v*sin(a)-g*t)/5"]],"color":"#dc2626"}
+    ],
+    "assumptions":["Bỏ qua sức cản không khí; vectơ vận tốc được thu nhỏ để dễ quan sát."]
+  },
+  {
+    "title":"Mô hình phân tử 3D minh hoạ",
+    "dimension":3,
+    "viewport":[-2,-2,2,2],
+    "objects":[
+      {"id":"oxygen","kind":"sphere","points":[[0,0,0]],"radius":0.4,"color":"#ef4444","label":"O"},
+      {"id":"h1","kind":"sphere","points":[[0.8,0.6,0]],"radius":0.22,"color":"#64748b","label":"H"},
+      {"id":"h2","kind":"sphere","points":[[-0.8,0.6,0]],"radius":0.22,"color":"#64748b","label":"H"},
+      {"id":"b1","kind":"cylinder","points":[[0,0,0],[0.8,0.6,0]],"radius":0.08,"color":"#94a3b8"},
+      {"id":"b2","kind":"cylinder","points":[[0,0,0],[-0.8,0.6,0]],"radius":0.08,"color":"#94a3b8"}
+    ],
+    "assumptions":["Sơ đồ liên kết minh hoạ, không khẳng định góc liên kết hoặc bán kính nguyên tử đúng tỉ lệ."]
+  }
+]

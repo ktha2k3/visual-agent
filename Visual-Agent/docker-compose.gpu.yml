@@ -1,0 +1,20 @@
+# Windows Docker Desktop / WSL2: OpenGL through Mesa D3D12 and WSLg.
+# docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build backend
+services:
+  backend:
+    gpus: all
+    devices:
+      - /dev/dxg:/dev/dxg
+    environment:
+      VISUALIZATION_RENDERER: opengl
+      VISUALIZATION_VERSION: stem-opengl-v1
+      GALLIUM_DRIVER: d3d12
+      MESA_D3D12_DEFAULT_ADAPTER_NAME: NVIDIA
+      LD_LIBRARY_PATH: /usr/lib/wsl/lib
+      EGL_PLATFORM: wayland
+      WAYLAND_DISPLAY: wayland-0
+      XDG_RUNTIME_DIR: /mnt/wslg/runtime-dir
+    volumes:
+      - /usr/lib/wsl/lib:/usr/lib/wsl/lib:ro
+      - /usr/lib/wsl/drivers:/usr/lib/wsl/drivers:ro
+      - /mnt/host/wslg:/mnt/wslg:ro

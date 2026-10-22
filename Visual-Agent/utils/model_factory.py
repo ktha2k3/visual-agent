@@ -34,6 +34,15 @@ def get_chat_model(role: str = "tutor", *, temperature: float = 0.1) -> ChatOpen
     }
     if role not in names:
         raise ValueError(f"Unknown model role: {role}")
+    if role in {"tutor", "visualization"}:
+        if not settings.river_api_key:
+            raise ValueError("RIVER_API_KEY is required for tutor and visualization models")
+        return ChatOpenAI(
+            model=names[role],
+            base_url=settings.river_base_url,
+            api_key=settings.river_api_key,
+            temperature=temperature,
+        )
     return ChatOpenAI(
         model=normalize_ollama_model(names[role], settings.ollama_base_url),
         base_url=settings.ollama_base_url,

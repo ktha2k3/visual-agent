@@ -212,3 +212,7 @@ button { cursor: pointer; }
   .messages { padding: 20px 14px; }.composer { padding: 10px 12px; }
   .knowledge-status-summary { grid-template-columns: repeat(2, 1fr); }
 }
+
+.illustration-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 12px 0; }
+.illustration-card ul { padding-left: 20px; font-size: .85rem; line-height: 1.5; }
+.stage-list .failed { color: #b91c1c; }

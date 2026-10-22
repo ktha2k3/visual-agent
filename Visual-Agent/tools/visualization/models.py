@@ -82,4 +82,7 @@ class StemVisualizationResult(BaseModel):
     cached: bool = False
     attempts: int = 0
     error: str | None = None
+    status: str | None = None
+    scene_data: dict | None = None
+    diagnostic_id: str | None = None
 

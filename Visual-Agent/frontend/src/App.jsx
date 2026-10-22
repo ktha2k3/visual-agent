@@ -4,6 +4,7 @@ import rehypeKatex from 'rehype-katex'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import { accessToken, authHeaders, supabase } from './supabase'
+import Illustration from './Illustration'
 
 const SUBJECTS = [
   { id: 'math', label: 'Toán', icon: '∫' },
@@ -165,7 +166,7 @@ function ProgressPanel({ stages, problem, hintLevel, citations, learningPlan }) 
       <div className="panel-heading"><div><span className="eyebrow">Tiến trình học</span><h2>Phiên hiện tại</h2></div><span className="hint-pill">Gợi ý {hintLevel}/4</span></div>
       <ol className="stage-list">
         {stages.length === 0 && <li className="muted">Các bước xử lý sẽ xuất hiện tại đây.</li>}
-        {stages.map((stage, index) => <li key={`${stage.stage}-${index}`} className={index === stages.length - 1 ? 'current' : 'complete'}><span>{index < stages.length - 1 ? '✓' : '•'}</span>{stage.label}</li>)}
+        {stages.map((stage, index) => <li key={`${stage.stage}-${index}`} className={stage.status === 'failed' ? 'failed' : stage.status === 'completed' ? 'complete' : 'current'}><span>{stage.status === 'completed' ? '✓' : stage.status === 'failed' ? '✕' : stage.status === 'unsupported' ? '–' : '•'}</span>{stage.label}</li>)}
       </ol>
       {learningPlan && <section className="learning-plan-card">
         <span className="eyebrow">Định hướng của Supervisor</span>
@@ -490,7 +491,9 @@ export default function App() {
   }
 
   const handleEvent = (event) => {
-    if (event.type === 'stage') setStages(current => [...current, event])
+    if (event.type === 'stage') setStages(current => event.stage?.startsWith('visualization:')
+      ? [...current.filter(item => !item.stage?.startsWith('visualization:')), event]
+      : [...current, event])
     if (event.type === 'problem_extracted') setProblem(event.problem)
     if (event.type === 'learning_plan') setLearningPlan(event.plan)
     if (event.type === 'mode_selected' && event.learning_mode) {
@@ -498,11 +501,11 @@ export default function App() {
       setLearningMode(event.learning_mode)
     }
     if (event.type === 'citation') setCitations(current => current.some(item => item.url === event.url) ? current : [...current, event])
-    if (event.type === 'visualization' && event.success) {
+    if (event.type === 'visualization') {
       setHasStreamingToken(true)
       setMessages(current => {
         const last = current[current.length - 1]
-        if (last?.role === 'assistant' && last.streaming) {
+        if (last?.role === 'assistant') {
           return [...current.slice(0, -1), { ...last, visualization: event }]
         }
         return [...current, { role: 'assistant', text: '', visualization: event, streaming: true }]
@@ -615,7 +618,7 @@ export default function App() {
       <div className="workspace"><ProgressPanel stages={stages} problem={problem} hintLevel={hintLevel} citations={citations} learningPlan={learningPlan} />
         <main className="chat-panel"><header><span className="subject-icon">{SUBJECTS.find(item => item.id === subject)?.icon}</span><div><h1>Học {SUBJECT_LABEL[subject]}</h1><p>{LEARNING_MODE_LABEL[learningMode]}</p></div><div className="mode-switch" role="group" aria-label="Chế độ học">{LEARNING_MODES.map(mode => <button key={mode.id} className={learningMode === mode.id ? 'active' : ''} disabled={busy || modeBusy || sessionLoading} onClick={() => selectLearningMode(mode.id).catch(err => { setError(err.message); setModeBusy(false) })}>{mode.label}</button>)}</div></header>
           <section className="messages">{messages.length === 0 && <div className="welcome"><h2>Bạn muốn học theo cách nào?</h2><p>Mode được lưu cùng phiên và điều khiển Supervisor, Research Agent và Tutor.</p><div className="learning-mode-actions">{LEARNING_MODES.map(mode => <button key={mode.id} className={learningMode === mode.id ? 'active' : ''} disabled={modeBusy || sessionLoading} onClick={() => selectLearningMode(mode.id).catch(err => { setError(err.message); setModeBusy(false) })}>{mode.label}</button>)}</div></div>}
-            {messages.map((message, index) => <article className={`message ${message.role}`} key={index}><span>{message.role === 'user' ? 'Bạn' : 'ST'}</span><div>{message.image && <img src={message.image} alt="Bài tập đã gửi" />}{message.visualization && <AuthenticatedVideo visualization={message.visualization} />}<Markdown>{message.text}</Markdown></div></article>)}
+            {messages.map((message, index) => <article className={`message ${message.role}`} key={index}><span>{message.role === 'user' ? 'Bạn' : 'ST'}</span><div>{message.image && <img src={message.image} alt="Bài tập đã gửi" />}{message.visualization && (message.visualization.scene_data || !message.visualization.success ? <Illustration visualization={message.visualization} /> : <AuthenticatedVideo visualization={message.visualization} />)}<Markdown>{message.text}</Markdown></div></article>)}
             {busy && !hasStreamingToken && <article className="message assistant"><span>ST</span><div className="typing"><i /><i /><i /></div></article>}<div ref={endRef} /></section>
           {error && <div className="error-banner">{error}<button onClick={() => setError('')}>×</button></div>}
           <footer className="composer">{asset && <div className="attachment"><img src={asset.localPreview} alt="preview" /><span>{asset.name}</span><button onClick={() => setAsset(null)}>×</button></div>}

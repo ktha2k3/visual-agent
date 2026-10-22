@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Annotated, Any, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -29,6 +30,8 @@ from services.repository import TutorRepository
 from services.storage import AssetStorage
 from tools.visualization.routing import decide_visualization
 from tools.visualization.service import StemVisualizationService
+from tools.visualization.templates import illustration_question
+from tools.visualization.scene_service import SceneIllustrationService
 from utils.model_factory import get_chat_model, get_embedding_model
 
 
@@ -81,6 +84,7 @@ class TutorState(TypedDict, total=False):
     assessed_skill_ids: list[str]
     visualization_decision: dict[str, Any]
     visualization: dict[str, Any]
+    visualization_external: bool
 
 
 SUBJECT_RULES = {
@@ -100,7 +104,7 @@ def build_tutor_graph(
     perception_service = ProblemPerception()
     tutor_model = get_chat_model("tutor")
     embedding_model = get_embedding_model()
-    visualizer = visualization_service or StemVisualizationService()
+    visualizer = visualization_service or SceneIllustrationService()
     if research_service is None:
         from agents.research_agent import problem_researcher
 
@@ -109,7 +113,13 @@ def build_tutor_graph(
     async def perception(state: TutorState) -> dict:
         attachment_ids = state.get("attachment_ids", [])
         previous = state.get("problem")
-        if not attachment_ids and previous:
+        message = state.get("message", "")
+        references_previous = bool(re.search(r"bài này|bài trên|vừa rồi|ở trên|tiếp tục|rõ hơn|phần này|câu này|this|that", message, re.I))
+        new_problem = not references_previous and bool(re.search(
+            r"bài mới|đề mới|hàm số|một vật|một con lắc|biên độ|chu kỳ|\by\s*=|"
+            r"(?:^|[.:]\s*|\bhãy\s+|\bgiúp em\s+|\bcho em\s+)(?:vẽ|mô phỏng|mo phong|giải thích|tính|giải|tìm)\b", message, re.I
+        ))
+        if not attachment_ids and previous and not new_problem:
             if state.get("needs_clarification") and state.get("message", "").strip():
                 corrected = await perception_service.extract(
                     message=state["message"], images=[]
@@ -173,18 +183,20 @@ def build_tutor_graph(
     async def visualization_decision(state: TutorState) -> dict:
         problem = ProblemExtraction.model_validate(state["problem"])
         decision = decide_visualization(state.get("message", ""), problem.subject)
+        packet = illustration_question(problem.problem_markdown, state.get("message", ""), state.get("conversation", []))
         return {
             "visualization_decision": {
                 "should_visualize": decision.should_visualize,
                 "subject": decision.subject,
                 "reason": decision.reason,
+                "question": packet,
             },
             "visualization": {},
         }
 
     def route_after_visualization_decision(state: TutorState) -> str:
         decision = state.get("visualization_decision", {})
-        return "visualization_tool" if decision.get("should_visualize") else "retrieval"
+        return "visualization_tool" if decision.get("should_visualize") and not state.get("visualization_external") else "retrieval"
 
     async def visualization(state: TutorState) -> dict:
         decision = state.get("visualization_decision", {})
@@ -194,7 +206,7 @@ def build_tutor_graph(
             writer({"type": "visualization_progress", "stage": stage})
 
         result = await visualizer.visualize(
-            question=state.get("message", ""),
+            question=decision.get("question", state.get("message", "")),
             subject=str(decision["subject"]),
             user_id=state["user_id"],
             level="THPT lớp 12",
@@ -329,6 +341,8 @@ def build_tutor_graph(
         system = (
             "Bạn là trợ giảng lớp 12 chỉ hỗ trợ Toán và Vật lí. Không tiết lộ "
             "chain-of-thought. Trả lời bằng tiếng Việt. "
+            "Ứng dụng có bộ dựng minh hoạ SVG 2D và cảnh 3D riêng. Không tự nhận rằng "
+            "khung chat không thể hiển thị hình; chỉ mô tả trạng thái minh hoạ nếu được cung cấp. "
             + teaching_policy
             + "\n"
             + SUBJECT_RULES.get(problem.subject.value, "")
@@ -367,6 +381,12 @@ def build_tutor_graph(
                     },
                     ensure_ascii=False,
                 )
+            )
+        elif state.get("visualization_external") and state.get("visualization_decision", {}).get("should_visualize"):
+            visualization_context = (
+                "\n\nMinh hoạ đang được xử lý riêng. Hãy trả lời ngay dựa trên đề; "
+                "không nói rằng bạn không thể tạo hoặc hiển thị hình trong chat; "
+                "không khẳng định đã tạo ảnh/video hoặc yêu cầu học sinh đợi minh hoạ."
             )
         elif state.get("visualization_decision", {}).get("should_visualize"):
             visualization_context = (

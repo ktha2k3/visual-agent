@@ -31,6 +31,10 @@ Giữ nguyên mục tiêu sư phạm và scene contract, chỉ sửa nguyên nh�
 thủ toàn bộ giới hạn an toàn: không IO, network, subprocess hoặc import nguy hiểm.
 Trả đúng một fenced Python block hoàn chỉnh, không kèm reasoning hay mô tả."""
 MANIM_COMPATIBILITY_RULES = """Manim CE 0.19 compatibility rules:
+- add_updater callbacks must accept the mobject: `def update(mobject): ...`
+  or `def update(mobject, dt): ...` (likewise for lambdas). Never register
+  a zero-argument callback, an async callback, or keyword-only dt.
+  Manim passes dt positionally when a parameter named dt exists.
 - Pass easing with the singular keyword `rate_func`, for example
   `rate_func=rate_functions.ease_in_quad`; never use `rate_functions=`.
 - Text accepts `font_size` or `.scale()`; never pass `size=` to Text.
