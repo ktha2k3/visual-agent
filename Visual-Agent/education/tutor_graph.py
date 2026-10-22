@@ -173,13 +173,6 @@ def build_tutor_graph(
             "hint_level": 0,
         }
 
-    def route_after_perception(state: TutorState) -> str:
-        return (
-            "clarification"
-            if state.get("needs_clarification")
-            else "visualization_router"
-        )
-
     async def visualization_decision(state: TutorState) -> dict:
         problem = ProblemExtraction.model_validate(state["problem"])
         decision = decide_visualization(state.get("message", ""), problem.subject)
@@ -196,7 +189,9 @@ def build_tutor_graph(
 
     def route_after_visualization_decision(state: TutorState) -> str:
         decision = state.get("visualization_decision", {})
-        return "visualization_tool" if decision.get("should_visualize") and not state.get("visualization_external") else "retrieval"
+        if decision.get("should_visualize") and not state.get("visualization_external"):
+            return "visualization_tool"
+        return "clarification" if state.get("needs_clarification") else "retrieval"
 
     async def visualization(state: TutorState) -> dict:
         decision = state.get("visualization_decision", {})
@@ -635,21 +630,15 @@ def build_tutor_graph(
     graph.add_node("assessment", assessment)
     graph.add_node("mastery", mastery)
     graph.set_entry_point("perception")
-    graph.add_conditional_edges(
-        "perception",
-        route_after_perception,
-        {
-            "clarification": "clarification",
-            "visualization_router": "visualization_router",
-        },
-    )
+    graph.add_edge("perception", "visualization_router")
     graph.add_edge("clarification", END)
     graph.add_conditional_edges(
         "visualization_router",
         route_after_visualization_decision,
-        {"visualization_tool": "visualization_tool", "retrieval": "retrieval"},
+        {"visualization_tool": "visualization_tool", "retrieval": "retrieval", "clarification": "clarification"},
     )
-    graph.add_edge("visualization_tool", "retrieval")
+    graph.add_conditional_edges("visualization_tool", lambda state: "clarification" if state.get("needs_clarification") else "retrieval",
+                                {"clarification": "clarification", "retrieval": "retrieval"})
     graph.add_edge("retrieval", "supervisor")
     graph.add_edge("supervisor", "research")
     graph.add_edge("research", "tutor")

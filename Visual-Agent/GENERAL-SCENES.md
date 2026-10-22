@@ -32,10 +32,11 @@ already specified lines. In 3D, midpoint and parallel are supported; other
 geometry can use explicit coordinates. The model schema and prompt state this
 distinction, including that a target must not appear among its own sources.
 
-The router recognizes explicit requests to provide/show a picture or graph as
-well as explanation/drawing keywords. This includes a request such as "đưa ra
-hình" without requiring the exact spelling of "minh hoạ". A declined picture
-request takes precedence; calculation-only geometry does not enable drawing.
+Every supported Math/Physics turn requests an independent illustration,
+including calculations, short answers and turns requiring clarification.
+No drawing keywords or intent filter is required. This application-wide policy
+also applies to messages asking for text alone. Missing essential data can still
+produce an explicit unsupported result rather than fabricated geometry.
 
 Math expressions use a bounded AST interpreter for numeric arithmetic and an
 allowlist of math functions. Arbitrary calls/attributes, imports and nonnumeric

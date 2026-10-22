@@ -137,9 +137,9 @@ def test_concept_questions_always_route_to_visualization(question, subject):
     assert decision.subject == subject.value
 
 
-def test_plain_calculation_does_not_force_visualization():
-    assert not decide_visualization("Tính 2 + 2", Subject.MATH).should_visualize
-    assert not decide_visualization("Giải phương trình x + 1 = 3", Subject.MATH).should_visualize
+def test_plain_calculation_also_forces_visualization():
+    assert decide_visualization("Tính 2 + 2", Subject.MATH).should_visualize
+    assert decide_visualization("Giải phương trình x + 1 = 3", Subject.MATH).should_visualize
     assert not decide_visualization("Giải thích phản ứng este", Subject.CHEMISTRY).should_visualize
 
 
